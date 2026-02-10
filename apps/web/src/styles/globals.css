@@ -1,0 +1,16 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  @apply bg-gray-950 text-white;
+}
+
+@keyframes slide-left {
+  to { transform: translateX(-120%) rotate(-8deg); opacity: 0; }
+}
+@keyframes slide-right {
+  to { transform: translateX(120%) rotate(8deg); opacity: 0; }
+}
+.animate-slide-left { animation: slide-left 0.35s ease-out forwards; }
+.animate-slide-right { animation: slide-right 0.35s ease-out forwards; }

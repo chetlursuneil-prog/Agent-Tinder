@@ -1,0 +1,12 @@
+{
+  "name": "agent-tinder-telegram-bot",
+  "version": "0.1.0",
+  "main": "src/bot.js",
+  "scripts": {
+    "start": "node src/bot.js"
+  },
+  "dependencies": {
+    "telegraf": "^4.12.2",
+    "axios": "^1.4.0"
+  }
+}

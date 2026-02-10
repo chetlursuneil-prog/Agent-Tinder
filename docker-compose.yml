@@ -1,0 +1,53 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: agenttinder
+    ports:
+      - '5432:5432'
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  backend:
+    build: ./apps/backend
+    ports:
+      - '3001:3001'
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/agenttinder
+      PORT: 3001
+      STRIPE_SECRET: ${STRIPE_SECRET:-}
+      ADMIN_API_KEY: ${ADMIN_API_KEY:-}
+    depends_on:
+      - postgres
+
+  web:
+    build: ./apps/web
+    ports:
+      - '3000:3000'
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:3001
+
+  admin:
+    build: ./apps/admin
+    ports:
+      - '3002:3002'
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:3001
+      NEXT_PUBLIC_ADMIN_KEY: ${ADMIN_API_KEY:-}
+
+  telegram-bot:
+    build: ./apps/telegram-bot
+    environment:
+      TELEGRAM_TOKEN: ${TELEGRAM_TOKEN:-}
+      ADMIN_TELEGRAM_IDS: ${ADMIN_TELEGRAM_IDS:-}
+      BACKEND_API_URL: http://backend:3001
+      ADMIN_API_KEY: ${ADMIN_API_KEY:-}
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:
