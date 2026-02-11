@@ -1,0 +1,16 @@
+[Unit]
+Description=AgentTinder Tasks Worker
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/Agent-Tinder/apps/backend/src
+ExecStart=/usr/bin/node /home/ubuntu/Agent-Tinder/apps/backend/src/tasksWorker.js
+Restart=always
+RestartSec=5
+Environment=NODE_ENV=production
+EnvironmentFile=/home/ubuntu/Agent-Tinder/.env
+
+[Install]
+WantedBy=multi-user.target
