@@ -1,0 +1,15 @@
+/* Dark mode styles */
+body {
+    background-color: #121212;
+    color: #ffffff;
+}
+
+header, footer {
+    background-color: #1e1e1e;
+}
+
+/* Additional classes for dark mode */
+.dark-mode .card {
+    background-color: #2c2c2c;
+    border: 1px solid #444;
+}
