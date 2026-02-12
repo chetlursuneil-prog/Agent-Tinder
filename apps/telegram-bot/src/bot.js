@@ -110,12 +110,24 @@ async function deployLive(taskType, prompt, userId) {
     // Step 1: Create backup tag on current AgentTinderv2.0 HEAD
     const { execSync } = require('child_process');
     const repoPath = '/home/ubuntu/Agent-Tinder';  // EC2 path
-    
-    // Create backup tag via SSH
-    execSync(`ssh -i ${process.env.SSH_KEY_PATH || '~/.ssh/agenttinder-key.pem'} ubuntu@${process.env.EC2_HOST || '16.171.1.185'} "cd ${repoPath} && git tag ${backupTag} && git push origin ${backupTag}"`, { 
-      encoding: 'utf-8',
-      stdio: 'pipe'
-    });
+
+    // If running on the server where the repo lives, prefer local git commands
+    let createdTag = false;
+    try {
+      // Try local tag + push (works when deployLive runs on EC2 itself)
+      execSync(`git -C ${repoPath} tag ${backupTag}`, { encoding: 'utf-8', stdio: 'pipe' });
+      execSync(`git -C ${repoPath} push origin ${backupTag}`, { encoding: 'utf-8', stdio: 'pipe' });
+      createdTag = true;
+    } catch (localTagErr) {
+      // Fallback to SSH tagging (for controller machines that trigger remote deploys)
+      const sshKey = process.env.SSH_KEY_PATH || '~/.ssh/agenttinder-key.pem';
+      const ec2Host = process.env.EC2_HOST || '16.171.1.185';
+      execSync(`ssh -i ${sshKey} ubuntu@${ec2Host} "cd ${repoPath} && git tag ${backupTag} && git push origin ${backupTag}"`, { 
+        encoding: 'utf-8',
+        stdio: 'pipe'
+      });
+      createdTag = true;
+    }
 
     // Step 2: Generate code with OpenClaw (commit directly mode)
     const response = await axios.post(`${OPENCLAW_API_URL}/process`, {
@@ -133,21 +145,39 @@ async function deployLive(taskType, prompt, userId) {
       throw new Error('OpenClaw did not return success status');
     }
 
-    // Step 3: Pull changes on EC2
-    const pullCmd = `ssh -i ${process.env.SSH_KEY_PATH || '~/.ssh/agenttinder-key.pem'} ubuntu@${process.env.EC2_HOST || '16.171.1.185'} "cd ${repoPath} && git fetch origin && git pull --ff-only origin AgentTinderv2.0"`;
-    const pullOutput = execSync(pullCmd, { encoding: 'utf-8', stdio: 'pipe' });
+    // Step 3: Pull changes on EC2 (prefer local pull if on-server)
+    try {
+      execSync(`git -C ${repoPath} fetch origin && git -C ${repoPath} pull --ff-only origin AgentTinderv2.0`, { encoding: 'utf-8', stdio: 'pipe' });
+    } catch (localPullErr) {
+      // fallback to SSH remote pull
+      const sshKey = process.env.SSH_KEY_PATH || '~/.ssh/agenttinder-key.pem';
+      const ec2Host = process.env.EC2_HOST || '16.171.1.185';
+      execSync(`ssh -i ${sshKey} ubuntu@${ec2Host} "cd ${repoPath} && git fetch origin && git pull --ff-only origin AgentTinderv2.0"`, { encoding: 'utf-8', stdio: 'pipe' });
+    }
 
     // Step 4: Restart affected services (all for safety)
-    const restartCmd = `ssh -i ${process.env.SSH_KEY_PATH || '~/.ssh/agenttinder-key.pem'} ubuntu@${process.env.EC2_HOST || '16.171.1.185'} "sudo systemctl restart backend telegram-bot openclaw"`;
-    execSync(restartCmd, { encoding: 'utf-8', stdio: 'pipe' });
+    try {
+      execSync(`sudo systemctl restart backend telegram-bot openclaw`, { encoding: 'utf-8', stdio: 'pipe' });
+    } catch (localRestartErr) {
+      const sshKey = process.env.SSH_KEY_PATH || '~/.ssh/agenttinder-key.pem';
+      const ec2Host = process.env.EC2_HOST || '16.171.1.185';
+      execSync(`ssh -i ${sshKey} ubuntu@${ec2Host} "sudo systemctl restart backend telegram-bot openclaw"`, { encoding: 'utf-8', stdio: 'pipe' });
+    }
 
     // Wait for services to start
     await new Promise(resolve => setTimeout(resolve, 3000));
 
-    // Step 5: Verify services are running
-    const statusCmd = `ssh -i ${process.env.SSH_KEY_PATH || '~/.ssh/agenttinder-key.pem'} ubuntu@${process.env.EC2_HOST || '16.171.1.185'} "systemctl is-active backend telegram-bot openclaw"`;
-    const statusOutput = execSync(statusCmd, { encoding: 'utf-8', stdio: 'pipe' });
-    const servicesActive = statusOutput.split('\\n').filter(s => s.trim() === 'active').length === 3;
+    // Step 5: Verify services are running (try local check first)
+    let servicesActive = false;
+    try {
+      const statusOutput = execSync(`systemctl is-active backend telegram-bot openclaw`, { encoding: 'utf-8', stdio: 'pipe' });
+      servicesActive = statusOutput.split('\n').filter(s => s.trim() === 'active').length === 3;
+    } catch (localStatusErr) {
+      const sshKey = process.env.SSH_KEY_PATH || '~/.ssh/agenttinder-key.pem';
+      const ec2Host = process.env.EC2_HOST || '16.171.1.185';
+      const statusOutput = execSync(`ssh -i ${sshKey} ubuntu@${ec2Host} "systemctl is-active backend telegram-bot openclaw"`, { encoding: 'utf-8', stdio: 'pipe' });
+      servicesActive = statusOutput.split('\n').filter(s => s.trim() === 'active').length === 3;
+    }
 
     if (!servicesActive) {
       throw new Error('Services failed to start after deployment');
