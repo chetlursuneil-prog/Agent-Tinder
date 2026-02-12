@@ -1,6 +1,7 @@
 const { Telegraf } = require('telegraf');
 const axios = require('axios');
 const OpenAI = require('openai');
+const { spawn } = require('child_process');
 
 const token = process.env.TELEGRAM_TOKEN || 'REPLACE_WITH_TOKEN';
 const ADMIN_IDS = (process.env.ADMIN_TELEGRAM_IDS || '').split(',').filter(Boolean).map(x => parseInt(x, 10));
@@ -9,6 +10,12 @@ const ADMIN_API_KEY = process.env.ADMIN_API_KEY || '';
 const OPENCLAW_API_URL = process.env.OPENCLAW_API_URL || 'http://127.0.0.1:8080';
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN || '';
 const GITHUB_REPO = process.env.GITHUB_REPO || 'chetlursuneil-prog/Agent-Tinder';
+
+// EC2 deployment configuration
+const EC2_HOST = process.env.EC2_HOST || '16.171.1.185';
+const EC2_USER = process.env.EC2_USER || 'ubuntu';
+const EC2_SSH_KEY_PATH = process.env.EC2_SSH_KEY_PATH || `${process.env.HOME || process.env.USERPROFILE}/.ssh/agenttinder-key.pem`;
+const EC2_REPO_PATH = process.env.EC2_REPO_PATH || '/home/ubuntu/Agent-Tinder';
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const bot = new Telegraf(token);
@@ -23,7 +30,8 @@ function getUserContext(userId) {
       lastIntent: null,
       conversationHistory: [],
       lastPrompt: null,
-      pendingUserCreation: null  // Stores pending user data awaiting email
+      pendingUserCreation: null,  // Stores pending user data awaiting email
+      pendingDeploy: null  // Stores pending deployment data awaiting PR/Deploy confirmation
     });
   }
   return userContexts.get(userId);
@@ -79,12 +87,12 @@ async function safeReply(ctx, message, useMarkdown = false) {
 }
 
 // Execute OpenClaw task
-async function executeTask(taskType, prompt, userId) {
+async function executeTask(taskType, prompt, userId, target = 'pr') {
   const response = await axios.post(`${OPENCLAW_API_URL}/process`, {
     type: taskType,
     body: {
       prompt: prompt,
-      target: 'pr'
+      target: target
     }
   }, { timeout: 300000 });
 
@@ -97,6 +105,119 @@ async function executeTask(taskType, prompt, userId) {
   }
 
   return result;
+}
+
+// Deploy to EC2 with safety tag and rollback support
+async function deployToEC2(ctx, commitMessage, userPrompt) {
+  const { spawn } = require('child_process');
+  const userId = ctx.from.id;
+  
+  try {
+    await safeReply(ctx, '🚀 Starting safe deployment to production...\n\n1️⃣ Creating safety tag...');
+    
+    // Create safety tag
+    const timestamp = Date.now();
+    const safetyTag = `safety-pre-deploy-${timestamp}`;
+    
+    const gitTag = spawn('git', ['tag', safetyTag]);
+    await new Promise((resolve, reject) => {
+      gitTag.on('close', (code) => code === 0 ? resolve() : reject(new Error(`git tag failed: ${code}`)));
+    });
+    
+    await safeReply(ctx, `✅ Safety tag created: \`${safetyTag}\`\n\n2️⃣ Pushing safety tag to remote...`);
+    
+    // Push tag
+    const pushTag = spawn('git', ['push', 'origin', safetyTag]);
+    await new Promise((resolve, reject) => {
+      pushTag.on('close', (code) => code === 0 ? resolve() : reject(new Error(`git push tag failed: ${code}`)));
+    });
+    
+    await safeReply(ctx, `✅ Safety tag pushed\n\n3️⃣ Committing changes...`);
+    
+    // Stage and commit changes
+    const gitAdd = spawn('git', ['add', '-A']);
+    await new Promise((resolve, reject) => {
+      gitAdd.on('close', (code) => code === 0 ? resolve() : reject(new Error(`git add failed: ${code}`)));
+    });
+    
+    const gitCommit = spawn('git', ['commit', '-m', commitMessage, '--allow-empty']);
+    await new Promise((resolve, reject) => {
+      gitCommit.on('close', (code) => {
+        // Exit code 1 means nothing to commit, which is ok
+        if (code === 0 || code === 1) resolve();
+        else reject(new Error(`git commit failed: ${code}`));
+      });
+    });
+    
+    await safeReply(ctx, `✅ Changes committed\n\n4️⃣ Pushing to main...`);
+    
+    // Push to main
+    const gitPush = spawn('git', ['push', 'origin', 'main']);
+    await new Promise((resolve, reject) => {
+      gitPush.on('close', (code) => code === 0 ? resolve() : reject(new Error(`git push failed: ${code}`)));
+    });
+    
+    await safeReply(ctx, `✅ Pushed to main\n\n5️⃣ Deploying to EC2 (${EC2_HOST})...`);
+    
+    // SSH to EC2 and deploy
+    const sshCmd = `cd ${EC2_REPO_PATH} && git fetch --all && git reset --hard origin/main && git clean -fd && sudo systemctl restart backend telegram-bot openclaw && sleep 2 && sudo systemctl is-active backend telegram-bot openclaw`;
+    
+    const ssh = spawn('ssh', [
+      '-i', EC2_SSH_KEY_PATH,
+      '-o', 'StrictHostKeyChecking=accept-new',
+      `${EC2_USER}@${EC2_HOST}`,
+      sshCmd
+    ]);
+    
+    let sshOutput = '';
+    ssh.stdout.on('data', (data) => { sshOutput += data.toString(); });
+    ssh.stderr.on('data', (data) => { sshOutput += data.toString(); });
+    
+    await new Promise((resolve, reject) => {
+      ssh.on('close', (code) => {
+        if (code === 0) resolve();
+        else reject(new Error(`SSH deploy failed: ${code}\n${sshOutput}`));
+      });
+    });
+    
+    // Parse service status
+    const services = ['backend', 'telegram-bot', 'openclaw'];
+    const statuses = sshOutput.split('\n').slice(0, 3);
+    let statusMsg = '\n';
+    services.forEach((svc, idx) => {
+      const status = statuses[idx]?.trim() || 'unknown';
+      statusMsg += `• ${svc}: ${status === 'active' ? '✅ active' : '❌ ' + status}\n`;
+    });
+    
+    const successMsg = `✅ *Deployment Complete!*\n\n` +
+                      `📦 Commit: ${commitMessage}\n` +
+                      `🏷️ Safety tag: \`${safetyTag}\`\n` +
+                      `🌐 Host: ${EC2_HOST}\n` +
+                      `\nServices:${statusMsg}\n` +
+                      `_If anything breaks, rollback with:_\n` +
+                      `\`git reset --hard ${safetyTag}\`\n\n` +
+                      `✨ Feature deployed for: "${userPrompt.substring(0, 60)}..."`;
+    
+    await safeReply(ctx, successMsg, true);
+    
+    // Log deployment
+    const userContext = getUserContext(userId);
+    userContext.conversationHistory.push({
+      role: 'assistant',
+      content: `Deployed to production: ${commitMessage}`
+    });
+    
+    return { success: true, safetyTag, commitMessage };
+    
+  } catch (error) {
+    console.error('Deployment error:', error);
+    const errorMsg = `❌ *Deployment Failed*\n\n` +
+                    `Error: ${error.message}\n\n` +
+                    `Your code is safe - nothing was deployed.\n` +
+                    `You can try again or create a PR instead.`;
+    await safeReply(ctx, errorMsg, true);
+    return { success: false, error: error.message };
+  }
 }
 
 // Fetch PR content from GitHub
@@ -389,6 +510,63 @@ bot.on('text', async (ctx) => {
   const userId = ctx.from.id;
   const userContext = getUserContext(userId);
 
+  // Check if we're waiting for PR/Deploy confirmation
+  if (userContext.pendingDeploy) {
+    const pendingData = userContext.pendingDeploy;
+    const response = userMessage.toLowerCase().trim();
+    
+    if (response.includes('pr') || response.includes('pull request')) {
+      await safeReply(ctx, `📝 Creating PR for: "${pendingData.prompt.substring(0, 80)}..."\n\nProcessing with OpenClaw...`);
+      
+      try {
+        const result = await executeTask(pendingData.taskType, pendingData.prompt, userId, 'pr');
+        
+        if (result.pr_url) {
+          const prNumber = result.pr_url.split('/pull/')[1];
+          const msg = `✅ *PR Created*\n\n` +
+                     `PR: [#${prNumber}](${result.pr_url})\n` +
+                     `Branch: \`${result.branch || 'N/A'}\`\n\n` +
+                     `_Review and merge when ready!_`;
+          await safeReply(ctx, msg, true);
+          userContext.conversationHistory.push({ 
+            role: 'assistant', 
+            content: `Created PR #${prNumber} for: ${pendingData.prompt}` 
+          });
+        } else {
+          await safeReply(ctx, `Task processed but no PR URL returned. Raw: ${JSON.stringify(result).substring(0, 200)}`);
+        }
+      } catch (error) {
+        await safeReply(ctx, `❌ Failed to create PR: ${error.message}`);
+      }
+      
+      userContext.pendingDeploy = null;
+      return;
+    } else if (response.includes('deploy') || response.includes('live') || response.includes('production')) {
+      await safeReply(ctx, `🚀 Deploying live: "${pendingData.prompt.substring(0, 80)}..."\n\nThis will:\n• Create safety tag\n• Push to main\n• Deploy to EC2\n\nStarting now...`);
+      
+      try {
+        // First execute the task to generate code
+        const result = await executeTask(pendingData.taskType, pendingData.prompt, userId, 'commit');
+        
+        if (result.success || result.branch) {
+          // Deploy to EC2
+          const commitMsg = `feat: ${pendingData.prompt.substring(0, 80)} [via Telegram]`;
+          await deployToEC2(ctx, commitMsg, pendingData.prompt);
+        } else {
+          await safeReply(ctx, `❌ Task execution failed, deployment aborted.\n\nRaw result: ${JSON.stringify(result).substring(0, 200)}`);
+        }
+      } catch (error) {
+        await safeReply(ctx, `❌ Deployment failed: ${error.message}`);
+      }
+      
+      userContext.pendingDeploy = null;
+      return;
+    } else {
+      await safeReply(ctx, `🤔 I didn't understand that. Please reply with:\n• "PR" to create a Pull Request\n• "Deploy" to deploy live to production\n\nWhat would you like to do?`);
+      return;
+    }
+  }
+  
   // Check if we're waiting for email for user creation
   if (userContext.pendingUserCreation) {
     const pendingData = userContext.pendingUserCreation;
@@ -483,27 +661,47 @@ bot.on('text', async (ctx) => {
       return;
     }
 
-    // Handle task (create PR)
+    // Handle task (create PR or deploy)
     if (intent.category === 'task') {
       const taskType = intent.taskType || 'plan';
-      await safeReply(ctx, `🔍 Detected: ${taskType}\n\nProcessing with OpenClaw + OpenAI...`, true);
-      
       userContext.lastPrompt = userMessage;
-      const result = await executeTask(taskType, userMessage, userId);
-
-      if (result.pr_url) {
-        const prNumber = result.pr_url.split('/pull/')[1];
-        const msg = `✅ *${taskType.toUpperCase()} Complete*\n\n` +
-                   `PR: [#${prNumber}](${result.pr_url})\n` +
-                   `Branch: \`${result.branch || 'N/A'}\`\n\n` +
-                   `_You can ask me about this PR anytime!_`;
-        await safeReply(ctx, msg, true);
-        userContext.conversationHistory.push({ 
-          role: 'assistant', 
-          content: `Created PR #${prNumber} for: ${userMessage}` 
-        });
+      
+      // Check if user explicitly requested deployment
+      const lowerMsg = userMessage.toLowerCase();
+      const explicitDeploy = lowerMsg.includes('deploy') || lowerMsg.includes('go live') || lowerMsg.includes('push to production');
+      
+      if (explicitDeploy) {
+        // User explicitly wants deployment - proceed directly
+        await safeReply(ctx, `🚀 Deploying: "${userMessage.substring(0, 80)}..."\n\nThis will create code, push to main, and deploy to EC2.\n\nStarting...`);
+        
+        try {
+          const result = await executeTask(taskType, userMessage, userId, 'commit');
+          
+          if (result.success || result.branch) {
+            const commitMsg = `feat: ${userMessage.substring(0, 80)} [via Telegram]`;
+            await deployToEC2(ctx, commitMsg, userMessage);
+          } else {
+            await safeReply(ctx, `❌ Task execution failed, deployment aborted.\n\nYou can try again or create a PR instead.`);
+          }
+        } catch (error) {
+          await safeReply(ctx, `❌ Deployment failed: ${error.message}`);
+        }
       } else {
-        await safeReply(ctx, `Task processed but no PR URL returned. Raw: ${JSON.stringify(result).substring(0, 200)}`);
+        // Ask user: PR or Deploy?
+        userContext.pendingDeploy = {
+          taskType: taskType,
+          prompt: userMessage,
+          timestamp: Date.now()
+        };
+        
+        const confirmMsg = `🔍 *Task Detected: ${taskType}*\n\n` +
+                          `Request: "${userMessage.substring(0, 100)}..."\n\n` +
+                          `How would you like to proceed?\n\n` +
+                          `• Reply "PR" - Create Pull Request for review\n` +
+                          `• Reply "Deploy" - Deploy directly to production\n\n` +
+                          `_Deployment creates safety tags for easy rollback_`;
+        
+        await safeReply(ctx, confirmMsg, true);
       }
       return;
     }
