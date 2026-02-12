@@ -22,7 +22,8 @@ function getUserContext(userId) {
       recentPRs: [],
       lastIntent: null,
       conversationHistory: [],
-      lastPrompt: null
+      lastPrompt: null,
+      pendingUserCreation: null  // Stores pending user data awaiting email
     });
   }
   return userContexts.get(userId);
@@ -388,6 +389,80 @@ bot.on('text', async (ctx) => {
   const userId = ctx.from.id;
   const userContext = getUserContext(userId);
 
+  // Check if we're waiting for email for user creation
+  if (userContext.pendingUserCreation) {
+    const pendingData = userContext.pendingUserCreation;
+    const emailInput = userMessage.trim();
+
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(emailInput)) {
+      await safeReply(ctx, `❌ Invalid email format: "${emailInput}"\n\nPlease provide a valid email address (e.g., user@example.com)`);
+      return;
+    }
+
+    // Continue with user creation using the provided email
+    await safeReply(ctx, `📋 Creating user with email: ${emailInput}...`);
+
+    try {
+      // Create user
+      const userPayload = {
+        email: emailInput,
+        name: pendingData.name || emailInput.split('@')[0]
+      };
+
+      const userRes = await axios.post(
+        `${BACKEND_API_URL}/admin/users`,
+        userPayload,
+        { headers: ADMIN_API_KEY ? { 'x-admin-key': ADMIN_API_KEY } : {} }
+      );
+
+      const createdUser = userRes.data;
+      const userId = createdUser.id;
+
+      // Create profile if skills or price provided
+      let profileMsg = '';
+      if (pendingData.skills.length > 0 || pendingData.price || pendingData.about) {
+        const profilePayload = {
+          userId: userId,
+          skills: pendingData.skills,
+          about: pendingData.about,
+          price: pendingData.price
+        };
+
+        const profileRes = await axios.post(
+          `${BACKEND_API_URL}/admin/profiles`,
+          profilePayload,
+          { headers: ADMIN_API_KEY ? { 'x-admin-key': ADMIN_API_KEY } : {} }
+        );
+
+        profileMsg = `\n\n📋 Profile created: \`${profileRes.data.id}\``;
+      }
+
+      const successMsg = `✅ *User Created Successfully!*\n\n` +
+                        `👤 Name: ${createdUser.name}\n` +
+                        `📧 Email: ${createdUser.email}\n` +
+                        `🆔 User ID: \`${userId}\`${profileMsg}\n\n` +
+                        `_User can now access the platform_`;
+      
+      await safeReply(ctx, successMsg, true);
+      
+      // Clear pending state
+      userContext.pendingUserCreation = null;
+    } catch (err) {
+      console.error('Create user error:', err?.response?.data || err.message);
+      const errorDetail = err?.response?.data?.error || err.message;
+      if (errorDetail.includes('duplicate') || errorDetail.includes('unique')) {
+        await safeReply(ctx, `❌ User with email ${emailInput} already exists. Try searching for them first.`);
+      } else {
+        await safeReply(ctx, `❌ Failed to create user: ${errorDetail}`);
+      }
+      // Clear pending state even on error
+      userContext.pendingUserCreation = null;
+    }
+    return;
+  }
+
   // Update conversation history
   userContext.conversationHistory.push({ role: 'user', content: userMessage });
   if (userContext.conversationHistory.length > 20) {
@@ -529,7 +604,21 @@ bot.on('text', async (ctx) => {
 
       // Check for mandatory field: email
       if (!extractedEmail) {
-        await safeReply(ctx, `📝 I need more information to create this user.\n\nPlease provide an email address.\n\nExample: "Create user suneil@example.com with python skills"`);
+        // Store pending data and ask for email
+        userContext.pendingUserCreation = {
+          name: extractedName,
+          skills: extractedSkills,
+          price: extractedPrice,
+          about: extractedAbout
+        };
+        
+        let pendingInfo = `📝 I need more information to create this user.\n\n`;
+        if (extractedName) pendingInfo += `Name: ${extractedName}\n`;
+        if (extractedSkills.length > 0) pendingInfo += `Skills: ${extractedSkills.join(', ')}\n`;
+        if (extractedPrice) pendingInfo += `Rate: $${extractedPrice}/hour\n`;
+        pendingInfo += `\nPlease reply with the email address:`;
+        
+        await safeReply(ctx, pendingInfo);
         return;
       }
 
