@@ -135,7 +135,7 @@ async function deployLive(taskType, prompt, userId) {
       body: {
         prompt: prompt,
         target: 'commit',  // Signal OpenClaw to commit directly
-        branch: 'AgentTinderv2.0'
+        branch: 'main'
       }
     }, { timeout: 300000 });
 
@@ -147,12 +147,12 @@ async function deployLive(taskType, prompt, userId) {
 
     // Step 3: Pull changes on EC2 (prefer local pull if on-server)
     try {
-      execSync(`git -C ${repoPath} fetch origin && git -C ${repoPath} pull --ff-only origin AgentTinderv2.0`, { encoding: 'utf-8', stdio: 'pipe' });
+      execSync(`git -C ${repoPath} fetch origin && git -C ${repoPath} pull --ff-only origin main`, { encoding: 'utf-8', stdio: 'pipe' });
     } catch (localPullErr) {
       // fallback to SSH remote pull
       const sshKey = process.env.SSH_KEY_PATH || '~/.ssh/agenttinder-key.pem';
       const ec2Host = process.env.EC2_HOST || '16.171.1.185';
-      execSync(`ssh -i ${sshKey} ubuntu@${ec2Host} "cd ${repoPath} && git fetch origin && git pull --ff-only origin AgentTinderv2.0"`, { encoding: 'utf-8', stdio: 'pipe' });
+      execSync(`ssh -i ${sshKey} ubuntu@${ec2Host} "cd ${repoPath} && git fetch origin && git pull --ff-only origin main"`, { encoding: 'utf-8', stdio: 'pipe' });
     }
 
     // Step 4: Restart affected services (all for safety)
@@ -258,7 +258,7 @@ Analyze the user's message and classify it into ONE of these categories:
    - "What do you think about Y?"
    - "Give me suggestions"
 
-2. **task** - User explicitly wants you to CREATE, IMPLEMENT, BUILD, or WRITE code. They want code changes made and a PR created.
+2. **task** - User explicitly wants you to CREATE, IMPLEMENT, BUILD, or WRITE code. They want code changes made and a PR created. ALSO includes retry/repeat requests.
    Examples:
    - "Create a feature that does X"
    - "Implement Y functionality"
@@ -267,6 +267,11 @@ Analyze the user's message and classify it into ONE of these categories:
    - "Write code to handle V"
    - "Fix the bug in X"
    - "Make this change: [specific change]"
+   - "Try again"
+   - "Can you try deploying again?"
+   - "Retry that"
+   - "Do it again"
+   - "Try deploying"
 
 3. **query_pr** - User asking about existing PRs, status of PRs, or code review
    Examples:
@@ -689,24 +694,64 @@ bot.on('text', async (ctx) => {
       return;
     }
 
-    // Handle task (create PR or deploy) - ALWAYS ask for confirmation
+    // Handle task (create PR or deploy)
     if (intent.category === 'task') {
       const taskType = intent.taskType || 'plan';
       userContext.lastPrompt = userMessage;
 
-      // Always ask user for preference (no explicit keyword skip)
-      userContext.pendingTask = {
-        taskType: taskType,
-        prompt: userMessage
-      };
-      const confirmMsg = `🔍 Detected: ${taskType}\n\n` +
-                        `📋 Task: "${userMessage.substring(0, 100)}${userMessage.length > 100 ? '...' : ''}"\n\n` +
-                        `⚠️ *How would you like to proceed?*\n\n` +
-                        `💡 *PR* - Create a pull request for review\n` +
-                        `🚀 *Deploy* - Deploy directly to live (with backup)\n\n` +
-                        `_Reply with "PR" or "Deploy"_`;
-      await safeReply(ctx, confirmMsg, true);
-      return;
+      // Check for explicit keywords to skip confirmation
+      const lowerMsg = userMessage.toLowerCase();
+      const explicitPR = lowerMsg.includes('create pr') || lowerMsg.includes('pull request') || lowerMsg.includes('open pr') || lowerMsg.includes('make a pr');
+      const explicitDeploy = lowerMsg.includes('deploy') || lowerMsg.includes('commit directly') || lowerMsg.includes('push live');
+
+      if (explicitPR) {
+        // Skip confirmation, create PR immediately
+        await safeReply(ctx, `🔍 Creating PR...`, true);
+        try {
+          const result = await executeTask(taskType, userMessage, userId);
+          if (result.pr_url) {
+            const prNumber = result.pr_url.split('/pull/')[1];
+            const msg = `✅ *${taskType.toUpperCase()} Complete*\n\n` +
+                       `PR: [#${prNumber}](${result.pr_url})\n` +
+                       `Branch: \`${result.branch || 'N/A'}\`\n\n` +
+                       `_You can ask me about this PR anytime!_`;
+            await safeReply(ctx, msg, true);
+            userContext.conversationHistory.push({ role: 'assistant', content: `Created PR #${prNumber} for: ${userMessage}` });
+          } else {
+            await safeReply(ctx, `Task processed but no PR URL returned.`);
+          }
+        } catch (err) {
+          console.error('PR creation error:', err);
+          await safeReply(ctx, `❌ Failed to create PR: ${err.message}`);
+        }
+        return;
+      } else if (explicitDeploy) {
+        // Skip confirmation, deploy immediately
+        await safeReply(ctx, `🚀 Deploying live with safety backup...`, true);
+        try {
+          const deployResult = await deployLive(taskType, userMessage, userId);
+          await safeReply(ctx, deployResult.message, true);
+          userContext.conversationHistory.push({ role: 'assistant', content: `Deployed live: ${userMessage}` });
+        } catch (err) {
+          console.error('Live deployment error:', err);
+          await safeReply(ctx, `❌ Deployment failed: ${err.message}\n\n_No changes were made to production_`);
+        }
+        return;
+      } else {
+        // Ask user for preference
+        userContext.pendingTask = {
+          taskType: taskType,
+          prompt: userMessage
+        };
+        const confirmMsg = `🔍 Detected: ${taskType}\n\n` +
+                          `📋 Task: "${userMessage.substring(0, 100)}${userMessage.length > 100 ? '...' : ''}"\n\n` +
+                          `⚠️ *How would you like to proceed?*\n\n` +
+                          `💡 *PR* - Create a pull request for review\n` +
+                          `🚀 *Deploy* - Deploy directly to live (with backup)\n\n` +
+                          `_Reply with "PR" or "Deploy"_`;
+        await safeReply(ctx, confirmMsg, true);
+        return;
+      }
     }
 
     // Handle PR query
