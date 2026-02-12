@@ -23,7 +23,8 @@ function getUserContext(userId) {
       lastIntent: null,
       conversationHistory: [],
       lastPrompt: null,
-      pendingUserCreation: null  // Stores pending user data awaiting email
+      pendingUserCreation: null,  // Stores pending user data awaiting email
+      pendingTask: null  // Stores pending task awaiting PR vs Deploy decision
     });
   }
   return userContexts.get(userId);
@@ -97,6 +98,87 @@ async function executeTask(taskType, prompt, userId) {
   }
 
   return result;
+}
+
+// Deploy changes directly to live with safety backup
+async function deployLive(taskType, prompt, userId) {
+  const timestamp = Date.now();
+  const backupTag = `backup-pre-deploy-${timestamp}`;
+  
+  try {
+    // Step 1: Create backup tag on current AgentTinderv2.0 HEAD
+    const { execSync } = require('child_process');
+    const repoPath = '/home/ubuntu/Agent-Tinder';  // EC2 path
+    
+    // Create backup tag via SSH
+    execSync(`ssh -i ${process.env.SSH_KEY_PATH || '~/.ssh/agenttinder-key.pem'} ubuntu@${process.env.EC2_HOST || '16.171.1.185'} "cd ${repoPath} && git tag ${backupTag} && git push origin ${backupTag}"`, { 
+      encoding: 'utf-8',
+      stdio: 'pipe'
+    });
+
+    // Step 2: Generate code with OpenClaw (commit directly mode)
+    const response = await axios.post(`${OPENCLAW_API_URL}/process`, {
+      type: taskType,
+      body: {
+        prompt: prompt,
+        target: 'commit',  // Signal OpenClaw to commit directly
+        branch: 'AgentTinderv2.0'
+      }
+    }, { timeout: 300000 });
+
+    const result = response.data;
+    
+    if (!result.commit_sha && !result.success) {
+      throw new Error('OpenClaw did not return success status');
+    }
+
+    // Step 3: Pull changes on EC2
+    const pullCmd = `ssh -i ${process.env.SSH_KEY_PATH || '~/.ssh/agenttinder-key.pem'} ubuntu@${process.env.EC2_HOST || '16.171.1.185'} "cd ${repoPath} && git fetch origin && git pull --ff-only origin AgentTinderv2.0"`;
+    const pullOutput = execSync(pullCmd, { encoding: 'utf-8', stdio: 'pipe' });
+
+    // Step 4: Restart affected services (all for safety)
+    const restartCmd = `ssh -i ${process.env.SSH_KEY_PATH || '~/.ssh/agenttinder-key.pem'} ubuntu@${process.env.EC2_HOST || '16.171.1.185'} "sudo systemctl restart backend telegram-bot openclaw"`;
+    execSync(restartCmd, { encoding: 'utf-8', stdio: 'pipe' });
+
+    // Wait for services to start
+    await new Promise(resolve => setTimeout(resolve, 3000));
+
+    // Step 5: Verify services are running
+    const statusCmd = `ssh -i ${process.env.SSH_KEY_PATH || '~/.ssh/agenttinder-key.pem'} ubuntu@${process.env.EC2_HOST || '16.171.1.185'} "systemctl is-active backend telegram-bot openclaw"`;
+    const statusOutput = execSync(statusCmd, { encoding: 'utf-8', stdio: 'pipe' });
+    const servicesActive = statusOutput.split('\\n').filter(s => s.trim() === 'active').length === 3;
+
+    if (!servicesActive) {
+      throw new Error('Services failed to start after deployment');
+    }
+
+    const commitSha = (result.commit_sha || 'unknown').substring(0, 7);
+    const successMsg = `✅ *Deployment Successful!*\n\n` +
+                      `📦 Commit: \`${commitSha}\`\n` +
+                      `🏷️ Backup: \`${backupTag}\`\n` +
+                      `🔄 Services restarted: backend, telegram-bot, openclaw\n\n` +
+                      `_All services active and running_\n\n` +
+                      `⚠️ To revert: \`git reset --hard ${backupTag}\``;
+
+    return { success: true, message: successMsg, backupTag, commitSha };
+
+  } catch (error) {
+    console.error('Deployment error:', error);
+    
+    // Attempt rollback
+    let rollbackMsg = '';
+    try {
+      const { execSync } = require('child_process');
+      const repoPath = '/home/ubuntu/Agent-Tinder';
+      const rollbackCmd = `ssh -i ${process.env.SSH_KEY_PATH || '~/.ssh/agenttinder-key.pem'} ubuntu@${process.env.EC2_HOST || '16.171.1.185'} "cd ${repoPath} && git reset --hard ${backupTag} && sudo systemctl restart backend telegram-bot openclaw"`;
+      execSync(rollbackCmd, { encoding: 'utf-8', stdio: 'pipe' });
+      rollbackMsg = `\n\n🔙 Automatic rollback to \`${backupTag}\` completed`;
+    } catch (rollbackErr) {
+      rollbackMsg = `\n\n⚠️ Rollback failed - manual intervention required`;
+    }
+
+    throw new Error(`${error.message}${rollbackMsg}`);
+  }
 }
 
 // Fetch PR content from GitHub
@@ -389,6 +471,60 @@ bot.on('text', async (ctx) => {
   const userId = ctx.from.id;
   const userContext = getUserContext(userId);
 
+  // Check if we're waiting for PR vs Deploy decision
+  if (userContext.pendingTask) {
+    const pendingTask = userContext.pendingTask;
+    const userChoice = userMessage.trim().toLowerCase();
+
+    if (userChoice.includes('pr') || userChoice.includes('pull request')) {
+      // User chose PR - execute existing flow
+      await safeReply(ctx, `🔍 Creating PR with OpenClaw...`, true);
+      userContext.pendingTask = null;
+
+      try {
+        const result = await executeTask(pendingTask.taskType, pendingTask.prompt, userId);
+        if (result.pr_url) {
+          const prNumber = result.pr_url.split('/pull/')[1];
+          const msg = `✅ *${pendingTask.taskType.toUpperCase()} Complete*\n\n` +
+                     `PR: [#${prNumber}](${result.pr_url})\n` +
+                     `Branch: \`${result.branch || 'N/A'}\`\n\n` +
+                     `_You can ask me about this PR anytime!_`;
+          await safeReply(ctx, msg, true);
+          userContext.conversationHistory.push({ 
+            role: 'assistant', 
+            content: `Created PR #${prNumber} for: ${pendingTask.prompt}` 
+          });
+        } else {
+          await safeReply(ctx, `Task processed but no PR URL returned.`);
+        }
+      } catch (err) {
+        console.error('PR creation error:', err);
+        await safeReply(ctx, `❌ Failed to create PR: ${err.message}`);
+      }
+      return;
+    } else if (userChoice.includes('deploy') || userChoice.includes('live') || userChoice.includes('commit')) {
+      // User chose Deploy live
+      await safeReply(ctx, `🚀 Deploying live with safety backup...`, true);
+      userContext.pendingTask = null;
+
+      try {
+        const deployResult = await deployLive(pendingTask.taskType, pendingTask.prompt, userId);
+        await safeReply(ctx, deployResult.message, true);
+        userContext.conversationHistory.push({ 
+          role: 'assistant', 
+          content: `Deployed live: ${pendingTask.prompt}` 
+        });
+      } catch (err) {
+        console.error('Live deployment error:', err);
+        await safeReply(ctx, `❌ Deployment failed: ${err.message}\n\n_No changes were made to production_`);
+      }
+      return;
+    } else {
+      await safeReply(ctx, `❓ Please respond with:\n\n"PR" - Create pull request\n"Deploy" - Deploy to live`);
+      return;
+    }
+  }
+
   // Check if we're waiting for email for user creation
   if (userContext.pendingUserCreation) {
     const pendingData = userContext.pendingUserCreation;
@@ -483,29 +619,65 @@ bot.on('text', async (ctx) => {
       return;
     }
 
-    // Handle task (create PR)
+    // Handle task (create PR or deploy)
     if (intent.category === 'task') {
       const taskType = intent.taskType || 'plan';
-      await safeReply(ctx, `🔍 Detected: ${taskType}\n\nProcessing with OpenClaw + OpenAI...`, true);
-      
       userContext.lastPrompt = userMessage;
-      const result = await executeTask(taskType, userMessage, userId);
 
-      if (result.pr_url) {
-        const prNumber = result.pr_url.split('/pull/')[1];
-        const msg = `✅ *${taskType.toUpperCase()} Complete*\n\n` +
-                   `PR: [#${prNumber}](${result.pr_url})\n` +
-                   `Branch: \`${result.branch || 'N/A'}\`\n\n` +
-                   `_You can ask me about this PR anytime!_`;
-        await safeReply(ctx, msg, true);
-        userContext.conversationHistory.push({ 
-          role: 'assistant', 
-          content: `Created PR #${prNumber} for: ${userMessage}` 
-        });
+      // Check if user explicitly requested PR or deploy
+      const lowerMsg = userMessage.toLowerCase();
+      const explicitPR = lowerMsg.includes('create pr') || lowerMsg.includes('pull request') || lowerMsg.includes('open pr');
+      const explicitDeploy = lowerMsg.includes('deploy live') || lowerMsg.includes('commit directly') || lowerMsg.includes('deploy it');
+
+      if (explicitPR) {
+        // Explicit PR request - execute immediately
+        await safeReply(ctx, `🔍 Detected: ${taskType}\n\nCreating PR with OpenClaw...`, true);
+        const result = await executeTask(taskType, userMessage, userId);
+        if (result.pr_url) {
+          const prNumber = result.pr_url.split('/pull/')[1];
+          const msg = `✅ *${taskType.toUpperCase()} Complete*\n\n` +
+                     `PR: [#${prNumber}](${result.pr_url})\n` +
+                     `Branch: \`${result.branch || 'N/A'}\`\n\n` +
+                     `_You can ask me about this PR anytime!_`;
+          await safeReply(ctx, msg, true);
+          userContext.conversationHistory.push({ 
+            role: 'assistant', 
+            content: `Created PR #${prNumber} for: ${userMessage}` 
+          });
+        } else {
+          await safeReply(ctx, `Task processed but no PR URL returned.`);
+        }
+        return;
+      } else if (explicitDeploy) {
+        // Explicit deploy request - execute immediately
+        await safeReply(ctx, `🚀 Deploying live with safety backup...`, true);
+        try {
+          const deployResult = await deployLive(taskType, userMessage, userId);
+          await safeReply(ctx, deployResult.message, true);
+          userContext.conversationHistory.push({ 
+            role: 'assistant', 
+            content: `Deployed live: ${userMessage}` 
+          });
+        } catch (err) {
+          console.error('Live deployment error:', err);
+          await safeReply(ctx, `❌ Deployment failed: ${err.message}\n\n_No changes were made to production_`);
+        }
+        return;
       } else {
-        await safeReply(ctx, `Task processed but no PR URL returned. Raw: ${JSON.stringify(result).substring(0, 200)}`);
+        // Ask user for preference
+        userContext.pendingTask = {
+          taskType: taskType,
+          prompt: userMessage
+        };
+        const confirmMsg = `🔍 Detected: ${taskType}\n\n` +
+                          `📋 Task: "${userMessage.substring(0, 100)}${userMessage.length > 100 ? '...' : ''}"\n\n` +
+                          `How would you like to proceed?\n\n` +
+                          `💡 *PR* - Create a pull request for review\n` +
+                          `🚀 *Deploy* - Deploy directly to live (with backup)\n\n` +
+                          `_Reply with "PR" or "Deploy"_`;
+        await safeReply(ctx, confirmMsg, true);
+        return;
       }
-      return;
     }
 
     // Handle PR query
