@@ -1,0 +1,12 @@
+
+## BUILD - 2026-02-12 07:04
+
+**Prompt:** can you add a PR for implementing a payments feature on agent tinder?
+
+**Plan:**
+{'1': 'Integrate Stripe for payment processing by adding a payment endpoint in the backend.', '2': 'Create a payment model and database schema to store payment records.', '3': 'Add a payment button in the frontend where users can initiate a payment.', '4': 'Implement a webhook to handle payment events from Stripe and update the database accordingly.', '5': "Ensure that the payment flow is secure and compliant with Stripe's guidelines."}
+
+**Files:** apps/backend/src/payments.js, apps/backend/src/db.js, apps/backend/src/index.js, apps/web/src/components/PaymentButton.js
+
+**Changes:** {'backend': {'src/payments.js': {'description': 'New file for handling payment processing with Stripe.', 'snippet': "const stripe = require('stripe')(process.env.STRIPE_SECRET);\n\napp.post('/payment', async (req, res) => {\n    const { amount, currency, source } = req.body;\n    try {\n        const charge = await stripe.charges.create({\n            amount,\n            currency,\n            source,\n        });\n        res.json({ success: true, charge });\n    } catch (error) {\n        res.status(500).json({ error: error.message });\n    }\n});"}, 'src/db.js': {'description': 'Add a new function to record payment transactions.', 'snippet': "async function recordPayment(userId, amount, status) {\n    const id = genId('payment');\n    await db.query('INSERT INTO payments (id, user_id, amount, status) VALUES ($1, $2, $3, $4)', [id, userId, amount, status]);\n}"}, 'src/index.js': {'description': 'Import and use the payments module to handle payment routes.', 'snippet': "const payments = require('./payments');\napp.use('/api', payments);"}}, 'frontend': {'src/components/PaymentButton.js': {'description': 'New component for rendering the payment button.', 'snippet': "import React from 'react';\n\nconst PaymentButton = ({ amount }) => {\n    const handlePayment = async () => {\n        const response = await fetch('/api/payment', {\n            method: 'POST',\n            headers: { 'Content-Type': 'application/json' },\n            body: JSON.stringify({ amount, currency: 'usd' }),\n        });\n        const result = await response.json();\n        if (result.success) {\n            alert('Payment successful!');\n        } else {\n            alert('Payment failed: ' + result.error);\n        }\n    };\n\n    return <button onClick={handlePayment}>Pay ${amount}</button>;\n};\n\nexport default PaymentButton;"}}}
+
