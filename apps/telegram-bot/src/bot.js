@@ -24,6 +24,7 @@ function getUserContext(userId) {
       conversationHistory: [],
       lastPrompt: null,
       pendingUserCreation: null,  // Stores pending user data awaiting email
+      pendingUserConfirmation: null,  // Stores complete user data awaiting confirmation
       pendingTask: null  // Stores pending task awaiting PR vs Deploy decision
     });
   }
@@ -525,6 +526,81 @@ bot.on('text', async (ctx) => {
     }
   }
 
+  // Check if we're waiting for user creation confirmation
+  if (userContext.pendingUserConfirmation) {
+    const userChoice = userMessage.trim().toLowerCase();
+    
+    if (userChoice.includes('yes') || userChoice.includes('confirm') || userChoice.includes('proceed')) {
+      const pendingData = userContext.pendingUserConfirmation;
+      await safeReply(ctx, `📋 Creating user...`);
+
+      try {
+        // Create user
+        const userPayload = {
+          email: pendingData.email,
+          name: pendingData.name || pendingData.email.split('@')[0]
+        };
+
+        const userRes = await axios.post(
+          `${BACKEND_API_URL}/admin/users`,
+          userPayload,
+          { headers: ADMIN_API_KEY ? { 'x-admin-key': ADMIN_API_KEY } : {} }
+        );
+
+        const createdUser = userRes.data;
+        const userId = createdUser.id;
+
+        // Create profile if skills or price provided
+        let profileMsg = '';
+        if (pendingData.skills.length > 0 || pendingData.price || pendingData.about) {
+          const profilePayload = {
+            userId: userId,
+            skills: pendingData.skills,
+            about: pendingData.about,
+            price: pendingData.price
+          };
+
+          const profileRes = await axios.post(
+            `${BACKEND_API_URL}/admin/profiles`,
+            profilePayload,
+            { headers: ADMIN_API_KEY ? { 'x-admin-key': ADMIN_API_KEY } : {} }
+          );
+
+          profileMsg = `\n\n📋 Profile created: \`${profileRes.data.id}\``;
+        }
+
+        const successMsg = `✅ *User Created Successfully!*\n\n` +
+                          `👤 Name: ${createdUser.name}\n` +
+                          `📧 Email: ${createdUser.email}\n` +
+                          `🆔 User ID: \`${userId}\`${profileMsg}\n\n` +
+                          `_User can now access the platform_`;
+        
+        await safeReply(ctx, successMsg, true);
+        
+        // Clear pending state
+        userContext.pendingUserConfirmation = null;
+      } catch (err) {
+        console.error('Create user error:', err?.response?.data || err.message);
+        const errorDetail = err?.response?.data?.error || err.message;
+        if (errorDetail.includes('duplicate') || errorDetail.includes('unique')) {
+          await safeReply(ctx, `❌ User with email ${pendingData.email} already exists. Try searching for them first.`);
+        } else {
+          await safeReply(ctx, `❌ Failed to create user: ${errorDetail}`);
+        }
+        // Clear pending state even on error
+        userContext.pendingUserConfirmation = null;
+      }
+      return;
+    } else if (userChoice.includes('no') || userChoice.includes('cancel')) {
+      await safeReply(ctx, `❌ User creation cancelled.`);
+      userContext.pendingUserConfirmation = null;
+      return;
+    } else {
+      await safeReply(ctx, `❓ Please respond with:\n\n"Yes" - Create the user\n"No" - Cancel`);
+      return;
+    }
+  }
+
   // Check if we're waiting for email for user creation
   if (userContext.pendingUserCreation) {
     const pendingData = userContext.pendingUserCreation;
@@ -537,65 +613,29 @@ bot.on('text', async (ctx) => {
       return;
     }
 
-    // Continue with user creation using the provided email
-    await safeReply(ctx, `📋 Creating user with email: ${emailInput}...`);
+    // Show confirmation prompt with summary
+    const completeData = {
+      ...pendingData,
+      email: emailInput
+    };
+    
+    userContext.pendingUserConfirmation = completeData;
+    userContext.pendingUserCreation = null;
 
-    try {
-      // Create user
-      const userPayload = {
-        email: emailInput,
-        name: pendingData.name || emailInput.split('@')[0]
-      };
-
-      const userRes = await axios.post(
-        `${BACKEND_API_URL}/admin/users`,
-        userPayload,
-        { headers: ADMIN_API_KEY ? { 'x-admin-key': ADMIN_API_KEY } : {} }
-      );
-
-      const createdUser = userRes.data;
-      const userId = createdUser.id;
-
-      // Create profile if skills or price provided
-      let profileMsg = '';
-      if (pendingData.skills.length > 0 || pendingData.price || pendingData.about) {
-        const profilePayload = {
-          userId: userId,
-          skills: pendingData.skills,
-          about: pendingData.about,
-          price: pendingData.price
-        };
-
-        const profileRes = await axios.post(
-          `${BACKEND_API_URL}/admin/profiles`,
-          profilePayload,
-          { headers: ADMIN_API_KEY ? { 'x-admin-key': ADMIN_API_KEY } : {} }
-        );
-
-        profileMsg = `\n\n📋 Profile created: \`${profileRes.data.id}\``;
-      }
-
-      const successMsg = `✅ *User Created Successfully!*\n\n` +
-                        `👤 Name: ${createdUser.name}\n` +
-                        `📧 Email: ${createdUser.email}\n` +
-                        `🆔 User ID: \`${userId}\`${profileMsg}\n\n` +
-                        `_User can now access the platform_`;
-      
-      await safeReply(ctx, successMsg, true);
-      
-      // Clear pending state
-      userContext.pendingUserCreation = null;
-    } catch (err) {
-      console.error('Create user error:', err?.response?.data || err.message);
-      const errorDetail = err?.response?.data?.error || err.message;
-      if (errorDetail.includes('duplicate') || errorDetail.includes('unique')) {
-        await safeReply(ctx, `❌ User with email ${emailInput} already exists. Try searching for them first.`);
-      } else {
-        await safeReply(ctx, `❌ Failed to create user: ${errorDetail}`);
-      }
-      // Clear pending state even on error
-      userContext.pendingUserCreation = null;
-    }
+    const skillsList = completeData.skills.length > 0 ? completeData.skills.join(', ') : 'None';
+    const priceText = completeData.price ? `$${completeData.price}/hour` : 'Not specified';
+    const aboutText = completeData.about || 'None';
+    
+    const confirmMsg = `📋 *User Creation Summary*\n\n` +
+                      `👤 Name: ${completeData.name || emailInput.split('@')[0]}\n` +
+                      `📧 Email: ${emailInput}\n` +
+                      `💼 Skills: ${skillsList}\n` +
+                      `💰 Rate: ${priceText}\n` +
+                      `📝 About: ${aboutText}\n\n` +
+                      `⚠️ *Confirm user creation?*\n\n` +
+                      `_Reply with "Yes" to create or "No" to cancel_`;
+    
+    await safeReply(ctx, confirmMsg, true);
     return;
   }
 
@@ -619,65 +659,24 @@ bot.on('text', async (ctx) => {
       return;
     }
 
-    // Handle task (create PR or deploy)
+    // Handle task (create PR or deploy) - ALWAYS ask for confirmation
     if (intent.category === 'task') {
       const taskType = intent.taskType || 'plan';
       userContext.lastPrompt = userMessage;
 
-      // Check if user explicitly requested PR or deploy
-      const lowerMsg = userMessage.toLowerCase();
-      const explicitPR = lowerMsg.includes('create pr') || lowerMsg.includes('pull request') || lowerMsg.includes('open pr');
-      const explicitDeploy = lowerMsg.includes('deploy live') || lowerMsg.includes('commit directly') || lowerMsg.includes('deploy it');
-
-      if (explicitPR) {
-        // Explicit PR request - execute immediately
-        await safeReply(ctx, `🔍 Detected: ${taskType}\n\nCreating PR with OpenClaw...`, true);
-        const result = await executeTask(taskType, userMessage, userId);
-        if (result.pr_url) {
-          const prNumber = result.pr_url.split('/pull/')[1];
-          const msg = `✅ *${taskType.toUpperCase()} Complete*\n\n` +
-                     `PR: [#${prNumber}](${result.pr_url})\n` +
-                     `Branch: \`${result.branch || 'N/A'}\`\n\n` +
-                     `_You can ask me about this PR anytime!_`;
-          await safeReply(ctx, msg, true);
-          userContext.conversationHistory.push({ 
-            role: 'assistant', 
-            content: `Created PR #${prNumber} for: ${userMessage}` 
-          });
-        } else {
-          await safeReply(ctx, `Task processed but no PR URL returned.`);
-        }
-        return;
-      } else if (explicitDeploy) {
-        // Explicit deploy request - execute immediately
-        await safeReply(ctx, `🚀 Deploying live with safety backup...`, true);
-        try {
-          const deployResult = await deployLive(taskType, userMessage, userId);
-          await safeReply(ctx, deployResult.message, true);
-          userContext.conversationHistory.push({ 
-            role: 'assistant', 
-            content: `Deployed live: ${userMessage}` 
-          });
-        } catch (err) {
-          console.error('Live deployment error:', err);
-          await safeReply(ctx, `❌ Deployment failed: ${err.message}\n\n_No changes were made to production_`);
-        }
-        return;
-      } else {
-        // Ask user for preference
-        userContext.pendingTask = {
-          taskType: taskType,
-          prompt: userMessage
-        };
-        const confirmMsg = `🔍 Detected: ${taskType}\n\n` +
-                          `📋 Task: "${userMessage.substring(0, 100)}${userMessage.length > 100 ? '...' : ''}"\n\n` +
-                          `How would you like to proceed?\n\n` +
-                          `💡 *PR* - Create a pull request for review\n` +
-                          `🚀 *Deploy* - Deploy directly to live (with backup)\n\n` +
-                          `_Reply with "PR" or "Deploy"_`;
-        await safeReply(ctx, confirmMsg, true);
-        return;
-      }
+      // Always ask user for preference (no explicit keyword skip)
+      userContext.pendingTask = {
+        taskType: taskType,
+        prompt: userMessage
+      };
+      const confirmMsg = `🔍 Detected: ${taskType}\n\n` +
+                        `📋 Task: "${userMessage.substring(0, 100)}${userMessage.length > 100 ? '...' : ''}"\n\n` +
+                        `⚠️ *How would you like to proceed?*\n\n` +
+                        `💡 *PR* - Create a pull request for review\n` +
+                        `🚀 *Deploy* - Deploy directly to live (with backup)\n\n` +
+                        `_Reply with "PR" or "Deploy"_`;
+      await safeReply(ctx, confirmMsg, true);
+      return;
     }
 
     // Handle PR query
