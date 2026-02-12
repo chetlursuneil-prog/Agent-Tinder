@@ -803,6 +803,16 @@ async function getAdminDashboard() {
   };
 }
 
+// ─── Search users (admin) ───────────────────────────────────
+async function searchUsers(query) {
+  const searchTerm = `%${query}%`;
+  const r = await pool.query(
+    'SELECT id, name, email, suspended, created_at FROM users WHERE LOWER(name) LIKE LOWER($1) OR LOWER(email) LIKE LOWER($1) ORDER BY created_at DESC LIMIT 20',
+    [searchTerm]
+  );
+  return r.rows;
+}
+
 // ─── All users (admin) ───────────────────────────────────────
 async function getAllUsers(limit, offset) {
   const lim = limit || 50;
@@ -929,6 +939,7 @@ module.exports = {
   getSummary,
   getAdminDashboard,
   getAllUsers,
+  searchUsers,
   getAllProfiles,
   getAuditLogs,
   setUserSuspended,

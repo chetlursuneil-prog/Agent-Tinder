@@ -7,6 +7,7 @@
   },
   "dependencies": {
     "telegraf": "^4.12.2",
-    "axios": "^1.4.0"
+    "axios": "^1.4.0",
+    "openai": "^4.20.0"
   }
 }

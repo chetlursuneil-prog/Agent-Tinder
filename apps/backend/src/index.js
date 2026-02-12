@@ -63,8 +63,27 @@ app.get('/profiles', async (req, res) => {
 	try {
 		const q = req.query.q;
 		const excludeForProfileId = req.query.excludeForProfileId;
-		const list = await db.getProfiles(q, excludeForProfileId);
-		res.json(list);
+		
+		// Get profiles from database
+		const dbProfiles = await db.getProfiles(q, excludeForProfileId);
+		
+		// ALSO get profiles from JSON file
+		const path = require('path');
+		const fs = require('fs').promises;
+		const PROFILES_FILE = path.join(__dirname, '..', 'data', 'profiles.json');
+		const fileProfiles = await (async () => {
+			try { 
+				const txt = await fs.readFile(PROFILES_FILE, 'utf8'); 
+				const profiles = JSON.parse(txt || '[]');
+				return profiles.filter(p => p.visible !== false);
+			} catch { 
+				return []; 
+			}
+		})();
+		
+		// Merge both sources
+		const allProfiles = [...dbProfiles, ...fileProfiles];
+		res.json(allProfiles);
 	} catch (err) {
 		console.error(err);
 		res.status(500).json({ error: 'server error' });
@@ -632,6 +651,20 @@ app.get('/admin/users', requireAdmin, async (req, res) => {
 	}
 });
 
+app.get('/admin/search-users', requireAdmin, async (req, res) => {
+	try {
+		const { q } = req.query;
+		if (!q || q.trim().length < 2) {
+			return res.status(400).json({ error: 'Search query must be at least 2 characters' });
+		}
+		const users = await db.searchUsers(q);
+		res.json({ users, count: users.length });
+	} catch (err) {
+		console.error(err);
+		res.status(500).json({ error: 'server error' });
+	}
+});
+
 app.get('/admin/reports', requireAdmin, async (req, res) => {
 	try {
 		const reports = await db.getReports(req.query.status || null);
@@ -753,8 +786,77 @@ app.delete('/admin/profiles/:id', requireAdmin, async (req, res) => {
 	}
 });
 
+// Lightweight tasks endpoint for integrations (Telegram bot uses this)
+// By default this app will persist tasks to a local JSON file at ./data/tasks.json
+// so a local worker can pick them up. If you have Supabase configured, replace
+// this implementation to insert into Postgres instead.
+const path = require('path');
+const fs = require('fs').promises;
+const TASKS_FILE = path.join(__dirname, '..', 'data', 'tasks.json');
+
+async function readTasksFile(){
+	try{ const txt = await fs.readFile(TASKS_FILE, 'utf8'); return JSON.parse(txt || '[]'); }catch(e){ return []; }
+}
+async function writeTasksFile(list){ await fs.writeFile(TASKS_FILE, JSON.stringify(list, null, 2), 'utf8'); }
+
+app.post('/tasks', requireAdmin, async (req, res) => {
+	try {
+		const { type, userId, body } = req.body || {};
+		if (!type) return res.status(400).json({ error: 'type required' });
+		const id = genId('task');
+		const task = { id, type, userId, body: body || null, status: 'pending', created_at: nowIso() };
+		// append to local file-backed queue
+		const list = await readTasksFile();
+		list.push(task);
+		await writeTasksFile(list);
+		console.log('Enqueued task', task.id, task.type);
+		res.status(201).json({ ok: true, task });
+	} catch (err) {
+		console.error('POST /tasks error', err);
+		res.status(500).json({ error: 'server error' });
+	}
+});
+
+// Admin: list tasks (quick verification)
+app.get('/tasks', requireAdmin, async (req, res) => {
+	try{
+		const list = await readTasksFile();
+		res.json(list);
+	}catch(err){ console.error(err); res.status(500).json({ error: 'server error' }); }
+});
+
+/* Internal notify endpoint: worker posts results here and backend relays to Telegram */
+app.post('/internal/notify', async (req, res) => {
+	try {
+		const { userId, taskId, result } = req.body || {};
+		if (!userId) return res.status(400).json({ error: 'userId required' });
+		const token = process.env.TELEGRAM_BOT_TOKEN;
+		if (!token) return res.status(500).json({ error: 'telegram token not configured' });
+
+		const text = `Task ${taskId} completed.\nResult: ${typeof result === 'string' ? result : JSON.stringify(result).slice(0,1500)}`;
+		const url = `https://api.telegram.org/bot${token}/sendMessage`;
+		const payload = { chat_id: userId, text };
+
+		// use native fetch on Node 18+
+		const resp = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
+		if (!resp.ok) {
+			const txt = await resp.text();
+			console.error('telegram send failed', resp.status, txt);
+			return res.status(500).json({ error: 'telegram send failed', details: txt });
+		}
+		res.json({ ok: true });
+	} catch (err) {
+		console.error('POST /internal/notify error', err);
+		res.status(500).json({ error: 'server error' });
+	}
+});
+
 async function main() {
-	await db.init();
+	try {
+		await db.init();
+	} catch (err) {
+		console.warn('DB initialization failed, continuing in degraded mode (file-backed features only).', err?.message || err);
+	}
 	const port = process.env.PORT || 3001;
 	app.listen(port, () => console.log(`Backend listening on ${port}`));
 }
@@ -762,4 +864,25 @@ async function main() {
 main().catch(err => {
 	console.error('Failed to start server', err);
 	process.exit(1);
+});
+
+// Get all profiles
+app.get('/api/profiles', async (req, res) => {
+  try {
+    const PROFILES_FILE = path.join(__dirname, '..', 'data', 'profiles.json');
+    const profiles = await (async () => {
+      try { 
+        const txt = await fs.readFile(PROFILES_FILE, 'utf8'); 
+        return JSON.parse(txt || '[]'); 
+      } catch { 
+        return []; 
+      }
+    })();
+    
+    const visible = profiles.filter(p => p.visible !== false);
+    res.json(visible);
+  } catch (err) {
+    console.error('GET /api/profiles error', err);
+    res.status(500).json({ error: 'server_error' });
+  }
 });
