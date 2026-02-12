@@ -651,6 +651,20 @@ app.get('/admin/users', requireAdmin, async (req, res) => {
 	}
 });
 
+app.get('/admin/search-users', requireAdmin, async (req, res) => {
+	try {
+		const { q } = req.query;
+		if (!q || q.trim().length < 2) {
+			return res.status(400).json({ error: 'Search query must be at least 2 characters' });
+		}
+		const users = await db.searchUsers(q);
+		res.json({ users, count: users.length });
+	} catch (err) {
+		console.error(err);
+		res.status(500).json({ error: 'server error' });
+	}
+});
+
 app.get('/admin/reports', requireAdmin, async (req, res) => {
 	try {
 		const reports = await db.getReports(req.query.status || null);

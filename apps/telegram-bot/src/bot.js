@@ -166,9 +166,16 @@ Analyze the user's message and classify it into ONE of these categories:
    - "Show me user statistics"
    - "Get me a report on matches"
 
-5. **greeting** - Simple greetings or thank you messages
+5. **user_search** - User asking if a specific user exists or searching for a user by name
+   Examples:
+   - "Does agent tinder have a user called suneil?"
+   - "Is there a user named John?"
+   - "Find user smith"
+   - "Search for user with email test@example.com"
 
-6. **help** - User asking how to use the bot or what commands are available
+6. **greeting** - Simple greetings or thank you messages
+
+7. **help** - User asking how to use the bot or what commands are available
 
 IMPORTANT DISTINCTION:
 - "Give me ideas" = conversation (just answer, don't code)
@@ -183,10 +190,11 @@ User message: "${userMessage}"
 
 Respond with JSON only:
 {
-  "category": "conversation|task|query_pr|admin_query|greeting|help",
+  "category": "conversation|task|query_pr|admin_query|user_search|greeting|help",
   "taskType": "plan|build|fix|null",
   "confidence": 0.0-1.0,
-  "reasoning": "brief explanation"
+  "reasoning": "brief explanation",
+  "searchQuery": "extracted user name or email if user_search, else null"
 }`;
 
   try {
@@ -443,7 +451,7 @@ bot.on('text', async (ctx) => {
 
     // Handle admin query (platform stats)
     if (intent.category === 'admin_query') {
-      await safeReply(ctx, '📊 Fetching platform data...', true);
+      await safeReply(ctx, '📊 Fetching platform data...');
       try {
         const res = await axios.get(BACKEND_API_URL + '/admin/summary', { 
           headers: ADMIN_API_KEY ? { 'x-admin-key': ADMIN_API_KEY } : {} 
@@ -454,6 +462,45 @@ bot.on('text', async (ctx) => {
       } catch (err) {
         console.error(err?.response?.data || err.message);
         await safeReply(ctx, 'Could not fetch platform statistics.');
+      }
+      return;
+    }
+
+    // Handle user search
+    if (intent.category === 'user_search') {
+      const searchQuery = intent.searchQuery || userMessage.replace(/does agent tinder have a user (called|named)?|is there a user|find user|search for user/gi, '').trim();
+      if (!searchQuery || searchQuery.length < 2) {
+        await safeReply(ctx, 'Please provide a name or email to search for.');
+        return;
+      }
+
+      await safeReply(ctx, `🔍 Searching for user: ${searchQuery}...`);
+      try {
+        const res = await axios.get(`${BACKEND_API_URL}/admin/search-users`, {
+          params: { q: searchQuery },
+          headers: ADMIN_API_KEY ? { 'x-admin-key': ADMIN_API_KEY } : {}
+        });
+
+        if (res.data.users && res.data.users.length > 0) {
+          const users = res.data.users.slice(0, 5); // Show max 5 results
+          let msg = `✅ Found ${res.data.count} user(s):\n\n`;
+          users.forEach(user => {
+            const suspendedTag = user.suspended ? ' [SUSPENDED]' : '';
+            msg += `👤 ${user.name || 'No name'}\n`;
+            msg += `   📧 ${user.email}\n`;
+            msg += `   🆔 ${user.id}${suspendedTag}\n`;
+            msg += `   📅 Joined: ${new Date(user.created_at).toLocaleDateString()}\n\n`;
+          });
+          if (res.data.count > 5) {
+            msg += `_...and ${res.data.count - 5} more results_`;
+          }
+          await safeReply(ctx, msg);
+        } else {
+          await safeReply(ctx, `❌ No users found matching "${searchQuery}"`);
+        }
+      } catch (err) {
+        console.error(err?.response?.data || err.message);
+        await safeReply(ctx, 'Could not search users. Check if the backend is running.');
       }
       return;
     }
