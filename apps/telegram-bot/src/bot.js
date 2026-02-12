@@ -173,9 +173,15 @@ Analyze the user's message and classify it into ONE of these categories:
    - "Find user smith"
    - "Search for user with email test@example.com"
 
-6. **greeting** - Simple greetings or thank you messages
+6. **create_user_profile** - Admin requesting to create a new user with profile
+   Examples:
+   - "Create a user named suneil che with node.js and python skills and 100 usd per hour rate"
+   - "Add user John Smith with java skills"
+   - "Create user test@example.com with AI expertise"
 
-7. **help** - User asking how to use the bot or what commands are available
+7. **greeting** - Simple greetings or thank you messages
+
+8. **help** - User asking how to use the bot or what commands are available
 
 IMPORTANT DISTINCTION:
 - "Give me ideas" = conversation (just answer, don't code)
@@ -190,11 +196,18 @@ User message: "${userMessage}"
 
 Respond with JSON only:
 {
-  "category": "conversation|task|query_pr|admin_query|user_search|greeting|help",
+  "category": "conversation|task|query_pr|admin_query|user_search|create_user_profile|greeting|help",
   "taskType": "plan|build|fix|null",
   "confidence": 0.0-1.0,
   "reasoning": "brief explanation",
-  "searchQuery": "extracted user name or email if user_search, else null"
+  "searchQuery": "extracted user name or email if user_search, else null",
+  "userData": {
+    "name": "extracted name if create_user_profile",
+    "email": "extracted email if create_user_profile",
+    "skills": ["array of extracted skills if create_user_profile"],
+    "price": "extracted hourly rate as number if create_user_profile",
+    "about": "extracted bio/description if create_user_profile"
+  }
 }`;
 
   try {
@@ -501,6 +514,92 @@ bot.on('text', async (ctx) => {
       } catch (err) {
         console.error(err?.response?.data || err.message);
         await safeReply(ctx, 'Could not search users. Check if the backend is running.');
+      }
+      return;
+    }
+
+    // Handle create user with profile
+    if (intent.category === 'create_user_profile') {
+      const userData = intent.userData || {};
+      const extractedName = userData.name || null;
+      const extractedEmail = userData.email || null;
+      const extractedSkills = Array.isArray(userData.skills) ? userData.skills : [];
+      const extractedPrice = userData.price || null;
+      const extractedAbout = userData.about || '';
+
+      // Check for mandatory field: email
+      if (!extractedEmail) {
+        await safeReply(ctx, `📝 I need more information to create this user.\n\nPlease provide an email address.\n\nExample: "Create user suneil@example.com with python skills"`);
+        return;
+      }
+
+      // Generate confirmation message
+      let confirmMsg = `📋 *User Creation Request*\n\n`;
+      confirmMsg += `Name: ${extractedName || '(not provided)'}\n`;
+      confirmMsg += `Email: ${extractedEmail}\n`;
+      if (extractedSkills.length > 0) {
+        confirmMsg += `Skills: ${extractedSkills.join(', ')}\n`;
+      }
+      if (extractedPrice) {
+        confirmMsg += `Rate: $${extractedPrice}/hour\n`;
+      }
+      if (extractedAbout) {
+        confirmMsg += `About: ${extractedAbout}\n`;
+      }
+      confirmMsg += `\n✅ Creating user and profile...`;
+
+      await safeReply(ctx, confirmMsg, true);
+
+      try {
+        // Step 1: Create user
+        const userPayload = {
+          email: extractedEmail,
+          name: extractedName || extractedEmail.split('@')[0]
+        };
+
+        const userRes = await axios.post(
+          `${BACKEND_API_URL}/admin/users`,
+          userPayload,
+          { headers: ADMIN_API_KEY ? { 'x-admin-key': ADMIN_API_KEY } : {} }
+        );
+
+        const createdUser = userRes.data;
+        const userId = createdUser.id;
+
+        // Step 2: Create profile if skills or price provided
+        let profileMsg = '';
+        if (extractedSkills.length > 0 || extractedPrice || extractedAbout) {
+          const profilePayload = {
+            userId: userId,
+            skills: extractedSkills,
+            about: extractedAbout,
+            price: extractedPrice
+          };
+
+          const profileRes = await axios.post(
+            `${BACKEND_API_URL}/admin/profiles`,
+            profilePayload,
+            { headers: ADMIN_API_KEY ? { 'x-admin-key': ADMIN_API_KEY } : {} }
+          );
+
+          profileMsg = `\n\n📋 Profile created: \`${profileRes.data.id}\``;
+        }
+
+        const successMsg = `✅ *User Created Successfully!*\n\n` +
+                          `👤 Name: ${createdUser.name}\n` +
+                          `📧 Email: ${createdUser.email}\n` +
+                          `🆔 User ID: \`${userId}\`${profileMsg}\n\n` +
+                          `_User can now access the platform_`;
+        
+        await safeReply(ctx, successMsg, true);
+      } catch (err) {
+        console.error('Create user error:', err?.response?.data || err.message);
+        const errorDetail = err?.response?.data?.error || err.message;
+        if (errorDetail.includes('duplicate') || errorDetail.includes('unique')) {
+          await safeReply(ctx, `❌ User with email ${extractedEmail} already exists. Try searching for them first.`);
+        } else {
+          await safeReply(ctx, `❌ Failed to create user: ${errorDetail}`);
+        }
       }
       return;
     }
