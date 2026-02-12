@@ -1,6 +1,6 @@
 'use client';
 import { useEffect } from 'react';
-import { useAuth } from '../../lib/auth-context';
+import { useAuth } from '../lib/auth-context';
 
 export default function HomePage() {
   const { user } = useAuth();

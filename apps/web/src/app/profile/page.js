@@ -1,7 +1,7 @@
 'use client';
 import { useState, useEffect } from 'react';
-import { createProfile, getProfileByUserId } from '../../lib/api';
-import { useAuth } from '../../lib/auth-context';
+import { createProfile, getProfileByUserId } from '../lib/api';
+import { useAuth } from '../lib/auth-context';
 
 export default function ProfilePage() {
   const { user } = useAuth();
