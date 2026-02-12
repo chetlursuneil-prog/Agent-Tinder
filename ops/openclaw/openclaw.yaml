@@ -1,0 +1,44 @@
+## Minimal OpenClaw workspace config (template)
+# Save as ops/openclaw/openclaw.yaml and edit paths as needed.
+workspace:
+  name: agenttinder-local
+  bind_address: 127.0.0.1
+  port: 8080
+  allow_remote: false
+
+agents: []
+
+# notes: this is a template only. Install Open-Claw on the VPS and point
+# its config to bind to 127.0.0.1 and port 8080 to keep it local-only.
+# OpenClaw configuration (template)
+workspace_root: /home/ubuntu/agenttinder
+allow_file_edits: true
+enable_git: true
+git_user: ubuntu
+
+# Command whitelist: OpenClaw is only permitted to run these commands via the agent
+command_whitelist:
+  - git
+  - npm
+  - node
+  - ls
+  - cat
+  - echo
+
+# Dangerous commands that must never be executed by the agent
+forbidden_commands:
+  - rm -rf /
+  - shutdown
+  - reboot
+  - dd
+  - ':(){ :|:& };:'
+  - curl http://169.254.169.254
+
+# HTTP binding: MUST be localhost for Free Tier safety and to avoid exposure
+http_bind_address: 127.0.0.1
+http_port: 8080
+
+notes: |
+  This is a safety-first configuration template. Do NOT expose OpenClaw to the public internet.
+  When you replace the stub with a production agent, ensure strict command whitelisting and
+  authentication headers are enforced.

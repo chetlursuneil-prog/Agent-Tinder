@@ -1,0 +1,19 @@
+[Unit]
+Description=AgentTinder Telegram Bot
+After=network.target backend.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/Agent-Tinder/apps/telegram-bot
+EnvironmentFile=/home/ubuntu/Agent-Tinder/.env
+Environment=NODE_OPTIONS=--dns-result-order=ipv4first
+Environment=BACKEND_API_URL=http://127.0.0.1:3001
+ExecStart=/usr/bin/node /home/ubuntu/Agent-Tinder/apps/telegram-bot/src/bot-fixed.js
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,8 +1,8 @@
 'use client';
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { signup, login as apiLogin } from '../../lib/api';
-import { useAuth } from '../../lib/auth-context';
+import { signup, login as apiLogin } from '../lib/api';
+import { useAuth } from '../lib/auth-context';
 
 export default function LoginPage() {
   const { loginUser, user } = useAuth();

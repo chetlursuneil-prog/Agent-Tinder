@@ -1,7 +1,7 @@
  'use client';
  import { useState, useEffect } from 'react';
- import { getProfiles, getProfileByUserId, searchProfilesAdvanced, getSavedSearches, createSavedSearch, deleteSavedSearch } from '../../lib/api';
- import { useAuth } from '../../lib/auth-context';
+import { getProfiles, getProfileByUserId, searchProfilesAdvanced, getSavedSearches, createSavedSearch, deleteSavedSearch } from '../lib/api';
+import { useAuth } from '../lib/auth-context';
  import SkillBadge from '../../components/SkillBadge';
  import StarRating from '../../components/StarRating';
  import LoadingSpinner from '../../components/LoadingSpinner';

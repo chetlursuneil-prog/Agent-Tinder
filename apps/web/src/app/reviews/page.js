@@ -1,7 +1,7 @@
 'use client';
 import { useState, useEffect } from 'react';
-import { useAuth } from '../../lib/auth-context';
-import { getConversations, checkReview, createReview, getProfileByUserId } from '../../lib/api';
+import { useAuth } from '../lib/auth-context';
+import { getConversations, checkReview, createReview, getProfileByUserId } from '../lib/api';
 
 export default function ReviewsPage() {
   const { user } = useAuth();

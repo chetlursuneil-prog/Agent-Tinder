@@ -1,0 +1,43 @@
+const fs = require('fs').promises;
+const path = require('path');
+
+const DATA_FILE = path.join(__dirname, '..', 'data', 'tasks.json');
+const BACKEND_API = process.env.BACKEND_API_URL || 'http://127.0.0.1:3001';
+
+async function loadTasks(){
+  try{ const txt = await fs.readFile(DATA_FILE,'utf8'); return JSON.parse(txt||'[]'); }catch(e){ return []; }
+}
+async function saveTasks(tasks){ await fs.writeFile(DATA_FILE, JSON.stringify(tasks,null,2),'utf8'); }
+
+// Use native fetch (Node 18+) to avoid extra deps
+async function postJson(url, body, timeout = 20000){
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeout);
+  try{
+    const res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal: controller.signal });
+    clearTimeout(id);
+    const text = await res.text();
+    try{ return JSON.parse(text); }catch(e){ return text; }
+  }catch(err){ clearTimeout(id); throw err; }
+}
+
+async function poll(){
+  while(true){
+    const tasks = await loadTasks();
+    const pending = tasks.find(t=>t.status==='pending');
+    if(!pending){ await new Promise(r=>setTimeout(r,3000)); continue; }
+    try{
+      pending.status='processing'; await saveTasks(tasks);
+      const resp = await postJson('http://127.0.0.1:8080/process', { type: pending.type, body: pending.body }, 20000);
+      pending.status='done'; pending.result = resp; pending.done_at = new Date().toISOString();
+      await saveTasks(tasks);
+      // notify backend internal endpoint (if present)
+      try{ await postJson(BACKEND_API + '/internal/notify', { userId: pending.userId, taskId: pending.id, result: pending.result }); }catch(e){ console.error('notify failed', e.message || e); }
+    }catch(err){
+      console.error('process task failed', err?.message||err);
+      pending.status='failed'; pending.error = err?.message || String(err); await saveTasks(tasks);
+    }
+  }
+}
+
+poll().catch(e=>{ console.error('worker crashed', e); process.exit(1); });

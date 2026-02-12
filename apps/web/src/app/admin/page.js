@@ -1,11 +1,11 @@
 'use client';
 import { useState, useEffect } from 'react';
-import { useAuth } from '../../lib/auth-context';
+import { useAuth } from '../lib/auth-context';
 import {
   getAdminDashboard, getAdminUsers, getReportsAdmin, resolveReportAdmin,
   suspendUser, getAdminAuditLogs, adminCreateUser, adminUpdateUser, adminDeleteUser,
   adminGetProfiles, adminCreateProfile, adminUpdateProfile, adminDeleteProfile
-} from '../../lib/api';
+} from '../lib/api';
 import StarRating from '../../components/StarRating';
 
 export default function AdminDashboardPage() {

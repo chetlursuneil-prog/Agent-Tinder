@@ -1,7 +1,7 @@
 'use client';
 import { useState, useEffect } from 'react';
-import { useAuth } from '../../lib/auth-context';
-import { getNotifications, markNotificationRead, markAllNotificationsRead } from '../../lib/api';
+import { useAuth } from '../lib/auth-context';
+import { getNotifications, markNotificationRead, markAllNotificationsRead } from '../lib/api';
 
 export default function NotificationsPage() {
   const { user } = useAuth();

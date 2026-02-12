@@ -1,8 +1,8 @@
 'use client';
 import { useState } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { createPaymentIntent } from '../../lib/api';
-import { useAuth } from '../../lib/auth-context';
+import { createPaymentIntent } from '../lib/api';
+import { useAuth } from '../lib/auth-context';
 
 export default function PayPage() {
   const searchParams = useSearchParams();

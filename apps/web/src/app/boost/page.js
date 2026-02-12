@@ -1,7 +1,7 @@
 'use client';
 import { useState, useEffect } from 'react';
-import { useAuth } from '../../lib/auth-context';
-import { getProfileByUserId, createBoost, getActiveBoost } from '../../lib/api';
+import { useAuth } from '../lib/auth-context';
+import { getProfileByUserId, createBoost, getActiveBoost } from '../lib/api';
 
 export default function BoostPage() {
   const { user } = useAuth();

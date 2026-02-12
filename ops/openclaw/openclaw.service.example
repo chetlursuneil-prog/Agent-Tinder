@@ -1,0 +1,17 @@
+[Unit]
+Description=OpenClaw (example) - bind to localhost only
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/openclaw
+# Replace ExecStart with your OpenClaw binary or start command
+ExecStart=/home/ubuntu/openclaw/bin/openclaw --config /home/ubuntu/openclaw/openclaw.yaml
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+
+# Copy this file to /etc/systemd/system/openclaw.service and edit ExecStart as needed.

@@ -1,0 +1,19 @@
+[Unit]
+Description=AgentTinder Telegram Bot
+After=network.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/agenttinder/apps/telegram-bot
+# Environment file should contain TELEGRAM_TOKEN, ADMIN_TELEGRAM_IDS, OPENCLAW_API_URL
+EnvironmentFile=/home/ubuntu/agenttinder/apps/telegram-bot/.env
+Environment=NODE_OPTIONS=--dns-result-order=ipv4first
+ExecStart=/usr/bin/node src/bot.js
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

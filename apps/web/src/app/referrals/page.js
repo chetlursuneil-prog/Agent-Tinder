@@ -1,7 +1,7 @@
 'use client';
 import { useState, useEffect } from 'react';
-import { useAuth } from '../../lib/auth-context';
-import { getReferrals, createReferral } from '../../lib/api';
+import { useAuth } from '../lib/auth-context';
+import { getReferrals, createReferral } from '../lib/api';
 
 export default function ReferralsPage() {
   const { user } = useAuth();

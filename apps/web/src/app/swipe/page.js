@@ -1,7 +1,7 @@
 'use client';
 import { useState, useEffect } from 'react';
-import { getProfiles, createMatch, getProfileByUserId } from '../../lib/api';
-import { useAuth } from '../../lib/auth-context';
+import { getProfiles, createMatch, getProfileByUserId } from '../lib/api';
+import { useAuth } from '../lib/auth-context';
 import AgentCard from '../../components/AgentCard';
 import LoadingSpinner from '../../components/LoadingSpinner';
 

@@ -1,7 +1,7 @@
 'use client';
 import { useState, useEffect } from 'react';
-import { useAuth } from '../../lib/auth-context';
-import { getConversations, markRead } from '../../lib/api';
+import { useAuth } from '../lib/auth-context';
+import { getConversations, markRead } from '../lib/api';
 import LoadingSpinner from '../../components/LoadingSpinner';
 import StarRating from '../../components/StarRating';
 
