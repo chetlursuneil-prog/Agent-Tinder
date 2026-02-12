@@ -426,14 +426,15 @@ bot.on('text', async (ctx) => {
         return;
       }
 
-      await safeReply(ctx, `🔍 Fetching PR #${prNumber}...`, true);
+      await safeReply(ctx, `🔍 Fetching PR #${prNumber}...`);
       const prData = await fetchPRContent(prNumber);
 
       if (prData) {
-        const title = escapeMarkdown(prData.title);
-        const body = escapeMarkdown((prData.body || 'No description').substring(0, 300));
-        const msg = `*PR #${prNumber}*\n\n*Title:* ${title}\n*Status:* ${prData.state}\n\n${body}\n\n[View on GitHub](${prData.url})`;
-        await safeReply(ctx, msg, true);
+        // Don't escape - send as natural text with line breaks
+        const title = prData.title || 'No title';
+        const body = (prData.body || 'No description').substring(0, 500);
+        const msg = `📝 PR #${prNumber}\n\n${title}\n\nStatus: ${prData.state}\n\n${body}\n\nView on GitHub: ${prData.url}`;
+        await safeReply(ctx, msg);
       } else {
         await safeReply(ctx, `Could not fetch PR #${prNumber}. Check the number or GitHub token.`);
       }
