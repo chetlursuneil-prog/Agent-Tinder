@@ -22,7 +22,10 @@ function getUserContext(userId) {
       recentPRs: [],
       lastIntent: null,
       conversationHistory: [],
-      lastPrompt: null
+      lastPrompt: null,
+      pendingUserCreation: null,  // Stores pending user data awaiting email
+      pendingUserConfirmation: null,  // Stores complete user data awaiting confirmation
+      pendingTask: null  // Stores pending task awaiting PR vs Deploy decision
     });
   }
   return userContexts.get(userId);
@@ -98,6 +101,117 @@ async function executeTask(taskType, prompt, userId) {
   return result;
 }
 
+// Deploy changes directly to live with safety backup
+async function deployLive(taskType, prompt, userId) {
+  const timestamp = Date.now();
+  const backupTag = `backup-pre-deploy-${timestamp}`;
+  
+  try {
+    // Step 1: Create backup tag on current AgentTinderv2.0 HEAD
+    const { execSync } = require('child_process');
+    const repoPath = '/home/ubuntu/Agent-Tinder';  // EC2 path
+
+    // If running on the server where the repo lives, prefer local git commands
+    let createdTag = false;
+    try {
+      // Try local tag + push (works when deployLive runs on EC2 itself)
+      execSync(`git -C ${repoPath} tag ${backupTag}`, { encoding: 'utf-8', stdio: 'pipe' });
+      execSync(`git -C ${repoPath} push origin ${backupTag}`, { encoding: 'utf-8', stdio: 'pipe' });
+      createdTag = true;
+    } catch (localTagErr) {
+      // Fallback to SSH tagging (for controller machines that trigger remote deploys)
+      const sshKey = process.env.SSH_KEY_PATH || '~/.ssh/agenttinder-key.pem';
+      const ec2Host = process.env.EC2_HOST || '16.171.1.185';
+      execSync(`ssh -i ${sshKey} ubuntu@${ec2Host} "cd ${repoPath} && git tag ${backupTag} && git push origin ${backupTag}"`, { 
+        encoding: 'utf-8',
+        stdio: 'pipe'
+      });
+      createdTag = true;
+    }
+
+    // Step 2: Generate code with OpenClaw (commit directly mode)
+    const response = await axios.post(`${OPENCLAW_API_URL}/process`, {
+      type: taskType,
+      body: {
+        prompt: prompt,
+        target: 'commit',  // Signal OpenClaw to commit directly
+        branch: 'main'
+      }
+    }, { timeout: 300000 });
+
+    const result = response.data;
+    
+    if (!result.commit_sha && !result.success) {
+      throw new Error('OpenClaw did not return success status');
+    }
+
+    // Step 3: Pull changes on EC2 (prefer local pull if on-server)
+    try {
+      execSync(`git -C ${repoPath} fetch origin && git -C ${repoPath} pull --ff-only origin main`, { encoding: 'utf-8', stdio: 'pipe' });
+    } catch (localPullErr) {
+      // fallback to SSH remote pull
+      const sshKey = process.env.SSH_KEY_PATH || '~/.ssh/agenttinder-key.pem';
+      const ec2Host = process.env.EC2_HOST || '16.171.1.185';
+      execSync(`ssh -i ${sshKey} ubuntu@${ec2Host} "cd ${repoPath} && git fetch origin && git pull --ff-only origin main"`, { encoding: 'utf-8', stdio: 'pipe' });
+    }
+
+    // Step 4: Restart affected services (all for safety)
+    try {
+      execSync(`sudo systemctl restart backend telegram-bot openclaw`, { encoding: 'utf-8', stdio: 'pipe' });
+    } catch (localRestartErr) {
+      const sshKey = process.env.SSH_KEY_PATH || '~/.ssh/agenttinder-key.pem';
+      const ec2Host = process.env.EC2_HOST || '16.171.1.185';
+      execSync(`ssh -i ${sshKey} ubuntu@${ec2Host} "sudo systemctl restart backend telegram-bot openclaw"`, { encoding: 'utf-8', stdio: 'pipe' });
+    }
+
+    // Wait for services to start
+    await new Promise(resolve => setTimeout(resolve, 3000));
+
+    // Step 5: Verify services are running (try local check first)
+    let servicesActive = false;
+    try {
+      const statusOutput = execSync(`systemctl is-active backend telegram-bot openclaw`, { encoding: 'utf-8', stdio: 'pipe' });
+      servicesActive = statusOutput.split('\n').filter(s => s.trim() === 'active').length === 3;
+    } catch (localStatusErr) {
+      const sshKey = process.env.SSH_KEY_PATH || '~/.ssh/agenttinder-key.pem';
+      const ec2Host = process.env.EC2_HOST || '16.171.1.185';
+      const statusOutput = execSync(`ssh -i ${sshKey} ubuntu@${ec2Host} "systemctl is-active backend telegram-bot openclaw"`, { encoding: 'utf-8', stdio: 'pipe' });
+      servicesActive = statusOutput.split('\n').filter(s => s.trim() === 'active').length === 3;
+    }
+
+    if (!servicesActive) {
+      throw new Error('Services failed to start after deployment');
+    }
+
+    const commitSha = (result.commit_sha || 'unknown').substring(0, 7);
+    const successMsg = `✅ *Deployment Successful!*\n\n` +
+                      `📦 Commit: \`${commitSha}\`\n` +
+                      `🏷️ Backup: \`${backupTag}\`\n` +
+                      `🔄 Services restarted: backend, telegram-bot, openclaw\n\n` +
+                      `_All services active and running_\n\n` +
+                      `⚠️ To revert: \`git reset --hard ${backupTag}\``;
+
+    return { success: true, message: successMsg, backupTag, commitSha };
+
+  } catch (error) {
+    console.error('Deployment error:', error);
+    
+    // Attempt rollback
+    let rollbackMsg = '';
+    try {
+      const { execSync } = require('child_process');
+      const repoPath = '/home/ubuntu/Agent-Tinder';
+      const rollbackCmd = `ssh -i ${process.env.SSH_KEY_PATH || '~/.ssh/agenttinder-key.pem'} ubuntu@${process.env.EC2_HOST || '16.171.1.185'} "cd ${repoPath} && git reset --hard ${backupTag} && sudo systemctl restart backend telegram-bot openclaw"`;
+      execSync(rollbackCmd, { encoding: 'utf-8', stdio: 'pipe' });
+      rollbackMsg = `\n\n🔙 Automatic rollback to \`${backupTag}\` completed`;
+    } catch (rollbackErr) {
+      rollbackMsg = `\n\n⚠️ Rollback failed - manual intervention required`;
+    }
+
+    throw new Error(`${error.message}${rollbackMsg}`);
+  }
+}
+
 // Fetch PR content from GitHub
 async function fetchPRContent(prNumber) {
   if (!GITHUB_TOKEN) return null;
@@ -144,7 +258,7 @@ Analyze the user's message and classify it into ONE of these categories:
    - "What do you think about Y?"
    - "Give me suggestions"
 
-2. **task** - User explicitly wants you to CREATE, IMPLEMENT, BUILD, or WRITE code. They want code changes made and a PR created.
+2. **task** - User explicitly wants you to CREATE, IMPLEMENT, BUILD, or WRITE code. They want code changes made and a PR created. ALSO includes retry/repeat requests.
    Examples:
    - "Create a feature that does X"
    - "Implement Y functionality"
@@ -153,6 +267,11 @@ Analyze the user's message and classify it into ONE of these categories:
    - "Write code to handle V"
    - "Fix the bug in X"
    - "Make this change: [specific change]"
+   - "Try again"
+   - "Can you try deploying again?"
+   - "Retry that"
+   - "Do it again"
+   - "Try deploying"
 
 3. **query_pr** - User asking about existing PRs, status of PRs, or code review
    Examples:
@@ -173,9 +292,15 @@ Analyze the user's message and classify it into ONE of these categories:
    - "Find user smith"
    - "Search for user with email test@example.com"
 
-6. **greeting** - Simple greetings or thank you messages
+6. **create_user_profile** - Admin requesting to create a new user with profile
+   Examples:
+   - "Create a user named suneil che with node.js and python skills and 100 usd per hour rate"
+   - "Add user John Smith with java skills"
+   - "Create user test@example.com with AI expertise"
 
-7. **help** - User asking how to use the bot or what commands are available
+7. **greeting** - Simple greetings or thank you messages
+
+8. **help** - User asking how to use the bot or what commands are available
 
 IMPORTANT DISTINCTION:
 - "Give me ideas" = conversation (just answer, don't code)
@@ -190,11 +315,18 @@ User message: "${userMessage}"
 
 Respond with JSON only:
 {
-  "category": "conversation|task|query_pr|admin_query|user_search|greeting|help",
+  "category": "conversation|task|query_pr|admin_query|user_search|create_user_profile|greeting|help",
   "taskType": "plan|build|fix|null",
   "confidence": 0.0-1.0,
   "reasoning": "brief explanation",
-  "searchQuery": "extracted user name or email if user_search, else null"
+  "searchQuery": "extracted user name or email if user_search, else null",
+  "userData": {
+    "name": "extracted name if create_user_profile",
+    "email": "extracted email if create_user_profile",
+    "skills": ["array of extracted skills if create_user_profile"],
+    "price": "extracted hourly rate as number if create_user_profile",
+    "about": "extracted bio/description if create_user_profile"
+  }
 }`;
 
   try {
@@ -375,6 +507,173 @@ bot.on('text', async (ctx) => {
   const userId = ctx.from.id;
   const userContext = getUserContext(userId);
 
+  // Check if we're waiting for PR vs Deploy decision
+  if (userContext.pendingTask) {
+    const pendingTask = userContext.pendingTask;
+    const userChoice = userMessage.trim().toLowerCase();
+
+    if (userChoice.includes('pr') || userChoice.includes('pull request')) {
+      // User chose PR - execute existing flow
+      await safeReply(ctx, `🔍 Creating PR with OpenClaw...`, true);
+      userContext.pendingTask = null;
+
+      try {
+        const result = await executeTask(pendingTask.taskType, pendingTask.prompt, userId);
+        if (result.pr_url) {
+          const prNumber = result.pr_url.split('/pull/')[1];
+          const msg = `✅ *${pendingTask.taskType.toUpperCase()} Complete*\n\n` +
+                     `PR: [#${prNumber}](${result.pr_url})\n` +
+                     `Branch: \`${result.branch || 'N/A'}\`\n\n` +
+                     `_You can ask me about this PR anytime!_`;
+          await safeReply(ctx, msg, true);
+          userContext.conversationHistory.push({ 
+            role: 'assistant', 
+            content: `Created PR #${prNumber} for: ${pendingTask.prompt}` 
+          });
+        } else {
+          await safeReply(ctx, `Task processed but no PR URL returned.`);
+        }
+      } catch (err) {
+        console.error('PR creation error:', err);
+        await safeReply(ctx, `❌ Failed to create PR: ${err.message}`);
+      }
+      return;
+    } else if (userChoice.includes('deploy') || userChoice.includes('live') || userChoice.includes('commit')) {
+      // User chose Deploy live
+      await safeReply(ctx, `🚀 Deploying live with safety backup...`, true);
+      userContext.pendingTask = null;
+
+      try {
+        const deployResult = await deployLive(pendingTask.taskType, pendingTask.prompt, userId);
+        await safeReply(ctx, deployResult.message, true);
+        userContext.conversationHistory.push({ 
+          role: 'assistant', 
+          content: `Deployed live: ${pendingTask.prompt}` 
+        });
+      } catch (err) {
+        console.error('Live deployment error:', err);
+        await safeReply(ctx, `❌ Deployment failed: ${err.message}\n\n_No changes were made to production_`);
+      }
+      return;
+    } else {
+      await safeReply(ctx, `❓ Please respond with:\n\n"PR" - Create pull request\n"Deploy" - Deploy to live`);
+      return;
+    }
+  }
+
+  // Check if we're waiting for user creation confirmation
+  if (userContext.pendingUserConfirmation) {
+    const userChoice = userMessage.trim().toLowerCase();
+    
+    if (userChoice.includes('yes') || userChoice.includes('confirm') || userChoice.includes('proceed')) {
+      const pendingData = userContext.pendingUserConfirmation;
+      await safeReply(ctx, `📋 Creating user...`);
+
+      try {
+        // Create user
+        const userPayload = {
+          email: pendingData.email,
+          name: pendingData.name || pendingData.email.split('@')[0]
+        };
+
+        const userRes = await axios.post(
+          `${BACKEND_API_URL}/admin/users`,
+          userPayload,
+          { headers: ADMIN_API_KEY ? { 'x-admin-key': ADMIN_API_KEY } : {} }
+        );
+
+        const createdUser = userRes.data;
+        const userId = createdUser.id;
+
+        // Create profile if skills or price provided
+        let profileMsg = '';
+        if (pendingData.skills.length > 0 || pendingData.price || pendingData.about) {
+          const profilePayload = {
+            userId: userId,
+            skills: pendingData.skills,
+            about: pendingData.about,
+            price: pendingData.price
+          };
+
+          const profileRes = await axios.post(
+            `${BACKEND_API_URL}/admin/profiles`,
+            profilePayload,
+            { headers: ADMIN_API_KEY ? { 'x-admin-key': ADMIN_API_KEY } : {} }
+          );
+
+          profileMsg = `\n\n📋 Profile created: \`${profileRes.data.id}\``;
+        }
+
+        const successMsg = `✅ *User Created Successfully!*\n\n` +
+                          `👤 Name: ${createdUser.name}\n` +
+                          `📧 Email: ${createdUser.email}\n` +
+                          `🆔 User ID: \`${userId}\`${profileMsg}\n\n` +
+                          `_User can now access the platform_`;
+        
+        await safeReply(ctx, successMsg, true);
+        
+        // Clear pending state
+        userContext.pendingUserConfirmation = null;
+      } catch (err) {
+        console.error('Create user error:', err?.response?.data || err.message);
+        const errorDetail = err?.response?.data?.error || err.message;
+        if (errorDetail.includes('duplicate') || errorDetail.includes('unique')) {
+          await safeReply(ctx, `❌ User with email ${pendingData.email} already exists. Try searching for them first.`);
+        } else {
+          await safeReply(ctx, `❌ Failed to create user: ${errorDetail}`);
+        }
+        // Clear pending state even on error
+        userContext.pendingUserConfirmation = null;
+      }
+      return;
+    } else if (userChoice.includes('no') || userChoice.includes('cancel')) {
+      await safeReply(ctx, `❌ User creation cancelled.`);
+      userContext.pendingUserConfirmation = null;
+      return;
+    } else {
+      await safeReply(ctx, `❓ Please respond with:\n\n"Yes" - Create the user\n"No" - Cancel`);
+      return;
+    }
+  }
+
+  // Check if we're waiting for email for user creation
+  if (userContext.pendingUserCreation) {
+    const pendingData = userContext.pendingUserCreation;
+    const emailInput = userMessage.trim();
+
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(emailInput)) {
+      await safeReply(ctx, `❌ Invalid email format: "${emailInput}"\n\nPlease provide a valid email address (e.g., user@example.com)`);
+      return;
+    }
+
+    // Show confirmation prompt with summary
+    const completeData = {
+      ...pendingData,
+      email: emailInput
+    };
+    
+    userContext.pendingUserConfirmation = completeData;
+    userContext.pendingUserCreation = null;
+
+    const skillsList = completeData.skills.length > 0 ? completeData.skills.join(', ') : 'None';
+    const priceText = completeData.price ? `$${completeData.price}/hour` : 'Not specified';
+    const aboutText = completeData.about || 'None';
+    
+    const confirmMsg = `📋 *User Creation Summary*\n\n` +
+                      `👤 Name: ${completeData.name || emailInput.split('@')[0]}\n` +
+                      `📧 Email: ${emailInput}\n` +
+                      `💼 Skills: ${skillsList}\n` +
+                      `💰 Rate: ${priceText}\n` +
+                      `📝 About: ${aboutText}\n\n` +
+                      `⚠️ *Confirm user creation?*\n\n` +
+                      `_Reply with "Yes" to create or "No" to cancel_`;
+    
+    await safeReply(ctx, confirmMsg, true);
+    return;
+  }
+
   // Update conversation history
   userContext.conversationHistory.push({ role: 'user', content: userMessage });
   if (userContext.conversationHistory.length > 20) {
@@ -395,29 +694,64 @@ bot.on('text', async (ctx) => {
       return;
     }
 
-    // Handle task (create PR)
+    // Handle task (create PR or deploy)
     if (intent.category === 'task') {
       const taskType = intent.taskType || 'plan';
-      await safeReply(ctx, `🔍 Detected: ${taskType}\n\nProcessing with OpenClaw + OpenAI...`, true);
-      
       userContext.lastPrompt = userMessage;
-      const result = await executeTask(taskType, userMessage, userId);
 
-      if (result.pr_url) {
-        const prNumber = result.pr_url.split('/pull/')[1];
-        const msg = `✅ *${taskType.toUpperCase()} Complete*\n\n` +
-                   `PR: [#${prNumber}](${result.pr_url})\n` +
-                   `Branch: \`${result.branch || 'N/A'}\`\n\n` +
-                   `_You can ask me about this PR anytime!_`;
-        await safeReply(ctx, msg, true);
-        userContext.conversationHistory.push({ 
-          role: 'assistant', 
-          content: `Created PR #${prNumber} for: ${userMessage}` 
-        });
+      // Check for explicit keywords to skip confirmation
+      const lowerMsg = userMessage.toLowerCase();
+      const explicitPR = lowerMsg.includes('create pr') || lowerMsg.includes('pull request') || lowerMsg.includes('open pr') || lowerMsg.includes('make a pr');
+      const explicitDeploy = lowerMsg.includes('deploy') || lowerMsg.includes('commit directly') || lowerMsg.includes('push live');
+
+      if (explicitPR) {
+        // Skip confirmation, create PR immediately
+        await safeReply(ctx, `🔍 Creating PR...`, true);
+        try {
+          const result = await executeTask(taskType, userMessage, userId);
+          if (result.pr_url) {
+            const prNumber = result.pr_url.split('/pull/')[1];
+            const msg = `✅ *${taskType.toUpperCase()} Complete*\n\n` +
+                       `PR: [#${prNumber}](${result.pr_url})\n` +
+                       `Branch: \`${result.branch || 'N/A'}\`\n\n` +
+                       `_You can ask me about this PR anytime!_`;
+            await safeReply(ctx, msg, true);
+            userContext.conversationHistory.push({ role: 'assistant', content: `Created PR #${prNumber} for: ${userMessage}` });
+          } else {
+            await safeReply(ctx, `Task processed but no PR URL returned.`);
+          }
+        } catch (err) {
+          console.error('PR creation error:', err);
+          await safeReply(ctx, `❌ Failed to create PR: ${err.message}`);
+        }
+        return;
+      } else if (explicitDeploy) {
+        // Skip confirmation, deploy immediately
+        await safeReply(ctx, `🚀 Deploying live with safety backup...`, true);
+        try {
+          const deployResult = await deployLive(taskType, userMessage, userId);
+          await safeReply(ctx, deployResult.message, true);
+          userContext.conversationHistory.push({ role: 'assistant', content: `Deployed live: ${userMessage}` });
+        } catch (err) {
+          console.error('Live deployment error:', err);
+          await safeReply(ctx, `❌ Deployment failed: ${err.message}\n\n_No changes were made to production_`);
+        }
+        return;
       } else {
-        await safeReply(ctx, `Task processed but no PR URL returned. Raw: ${JSON.stringify(result).substring(0, 200)}`);
+        // Ask user for preference
+        userContext.pendingTask = {
+          taskType: taskType,
+          prompt: userMessage
+        };
+        const confirmMsg = `🔍 Detected: ${taskType}\n\n` +
+                          `📋 Task: "${userMessage.substring(0, 100)}${userMessage.length > 100 ? '...' : ''}"\n\n` +
+                          `⚠️ *How would you like to proceed?*\n\n` +
+                          `💡 *PR* - Create a pull request for review\n` +
+                          `🚀 *Deploy* - Deploy directly to live (with backup)\n\n` +
+                          `_Reply with "PR" or "Deploy"_`;
+        await safeReply(ctx, confirmMsg, true);
+        return;
       }
-      return;
     }
 
     // Handle PR query
@@ -501,6 +835,106 @@ bot.on('text', async (ctx) => {
       } catch (err) {
         console.error(err?.response?.data || err.message);
         await safeReply(ctx, 'Could not search users. Check if the backend is running.');
+      }
+      return;
+    }
+
+    // Handle create user with profile
+    if (intent.category === 'create_user_profile') {
+      const userData = intent.userData || {};
+      const extractedName = userData.name || null;
+      const extractedEmail = userData.email || null;
+      const extractedSkills = Array.isArray(userData.skills) ? userData.skills : [];
+      const extractedPrice = userData.price || null;
+      const extractedAbout = userData.about || '';
+
+      // Check for mandatory field: email
+      if (!extractedEmail) {
+        // Store pending data and ask for email
+        userContext.pendingUserCreation = {
+          name: extractedName,
+          skills: extractedSkills,
+          price: extractedPrice,
+          about: extractedAbout
+        };
+        
+        let pendingInfo = `📝 I need more information to create this user.\n\n`;
+        if (extractedName) pendingInfo += `Name: ${extractedName}\n`;
+        if (extractedSkills.length > 0) pendingInfo += `Skills: ${extractedSkills.join(', ')}\n`;
+        if (extractedPrice) pendingInfo += `Rate: $${extractedPrice}/hour\n`;
+        pendingInfo += `\nPlease reply with the email address:`;
+        
+        await safeReply(ctx, pendingInfo);
+        return;
+      }
+
+      // Generate confirmation message
+      let confirmMsg = `📋 *User Creation Request*\n\n`;
+      confirmMsg += `Name: ${extractedName || '(not provided)'}\n`;
+      confirmMsg += `Email: ${extractedEmail}\n`;
+      if (extractedSkills.length > 0) {
+        confirmMsg += `Skills: ${extractedSkills.join(', ')}\n`;
+      }
+      if (extractedPrice) {
+        confirmMsg += `Rate: $${extractedPrice}/hour\n`;
+      }
+      if (extractedAbout) {
+        confirmMsg += `About: ${extractedAbout}\n`;
+      }
+      confirmMsg += `\n✅ Creating user and profile...`;
+
+      await safeReply(ctx, confirmMsg, true);
+
+      try {
+        // Step 1: Create user
+        const userPayload = {
+          email: extractedEmail,
+          name: extractedName || extractedEmail.split('@')[0]
+        };
+
+        const userRes = await axios.post(
+          `${BACKEND_API_URL}/admin/users`,
+          userPayload,
+          { headers: ADMIN_API_KEY ? { 'x-admin-key': ADMIN_API_KEY } : {} }
+        );
+
+        const createdUser = userRes.data;
+        const userId = createdUser.id;
+
+        // Step 2: Create profile if skills or price provided
+        let profileMsg = '';
+        if (extractedSkills.length > 0 || extractedPrice || extractedAbout) {
+          const profilePayload = {
+            userId: userId,
+            skills: extractedSkills,
+            about: extractedAbout,
+            price: extractedPrice
+          };
+
+          const profileRes = await axios.post(
+            `${BACKEND_API_URL}/admin/profiles`,
+            profilePayload,
+            { headers: ADMIN_API_KEY ? { 'x-admin-key': ADMIN_API_KEY } : {} }
+          );
+
+          profileMsg = `\n\n📋 Profile created: \`${profileRes.data.id}\``;
+        }
+
+        const successMsg = `✅ *User Created Successfully!*\n\n` +
+                          `👤 Name: ${createdUser.name}\n` +
+                          `📧 Email: ${createdUser.email}\n` +
+                          `🆔 User ID: \`${userId}\`${profileMsg}\n\n` +
+                          `_User can now access the platform_`;
+        
+        await safeReply(ctx, successMsg, true);
+      } catch (err) {
+        console.error('Create user error:', err?.response?.data || err.message);
+        const errorDetail = err?.response?.data?.error || err.message;
+        if (errorDetail.includes('duplicate') || errorDetail.includes('unique')) {
+          await safeReply(ctx, `❌ User with email ${extractedEmail} already exists. Try searching for them first.`);
+        } else {
+          await safeReply(ctx, `❌ Failed to create user: ${errorDetail}`);
+        }
       }
       return;
     }
