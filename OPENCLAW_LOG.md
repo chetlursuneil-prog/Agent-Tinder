@@ -1,0 +1,12 @@
+
+## BUILD - 2026-02-13 19:10
+
+**Prompt:** can you create a feature for payments on the application
+
+**Plan:**
+Implement a payment feature that allows users to subscribe to different plans using Stripe. This will include creating payment routes, integrating Stripe for payments, handling webhooks for payment events, and updating user profiles with payment status.
+
+**Files:** apps/backend/src/index.js, apps/backend/src/payments.js, apps/backend/src/db.js
+
+**Changes:** [{'file': 'apps/backend/src/index.js', 'snippet': ["const paymentsRouter = require('./payments');", "app.use('/api/payments', paymentsRouter);"], 'description': 'Import and use the payments router for handling payment-related requests.'}, {'file': 'apps/backend/src/payments.js', 'snippet': ["const express = require('express');", "const stripe = require('stripe')(process.env.STRIPE_SECRET);", 'const router = express.Router();', '', "router.post('/create-checkout-session', async (req, res) => {", '  const { priceId } = req.body;', '  const session = await stripe.checkout.sessions.create({', '    line_items: [{ price: priceId, quantity: 1 }],', "    mode: 'payment',", '    success_url: `${req.headers.origin}/success`,', '    cancel_url: `${req.headers.origin}/cancel`,', '  });', '  res.json({ id: session.id });', '});', '', 'module.exports = router;'], 'description': 'Create a new payments.js file to handle the payment routes, including a route to create a checkout session.'}, {'file': 'apps/backend/src/db.js', 'snippet': ['async function updateUserPaymentStatus(userId, status) {', '  // Update the user payment status in the database', "  await db.query('UPDATE users SET payment_status = $1 WHERE id = $2', [status, userId]);", '}', '', 'module.exports = { updateUserPaymentStatus };'], 'description': "Add a function to update the user's payment status in the database."}, {'file': 'apps/backend/src/index.js', 'snippet': ["app.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {", '  const event = req.body;', '  switch (event.type) {', "    case 'checkout.session.completed':", '      const session = event.data.object;', '      // Handle successful payment here', "      await updateUserPaymentStatus(session.client_reference_id, 'paid');", '      break;', '    // Handle other event types as needed', '  }', '  res.json({ received: true });', '});'], 'description': 'Implement a webhook endpoint to handle Stripe payment events.'}]
+
